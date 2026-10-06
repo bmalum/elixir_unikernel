@@ -1,0 +1,4 @@
+build/
+app/_build/
+app/deps/
+*.log

@@ -1,0 +1,65 @@
+name: smoke
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: build static OTP + Elixir release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build release (cached by OTP/Elixir tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: builder/Dockerfile
+          platforms: linux/amd64
+          target: out
+          outputs: type=local,dest=build/out
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: assemble rootfs + initramfs
+        run: |
+          scripts/assemble-rootfs.sh build/out build/rootfs
+          scripts/mkinitramfs.sh build/rootfs build/initramfs.cpio.gz
+          ls -l build/initramfs.cpio.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: initramfs
+          path: build/initramfs.cpio.gz
+
+  m0-linux:
+    name: M0 smoke (Alpine linux-virt)
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: initramfs, path: build }
+      - run: sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - run: make m0-kernel
+      - run: make smoke-m0 QEMU_ACCEL=tcg
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: m0-logs, path: build/logs }
+
+  m1-asterinas:
+    name: M1 smoke (Asterinas)
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: initramfs, path: build }
+      - run: sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86
+      - run: make asterinas
+      - run: make smoke-m1 QEMU_ACCEL=tcg
+      - run: make sizes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: m1-logs, path: build/logs }
