@@ -34,5 +34,5 @@ First working release: milestones M0 (stock Linux), M1 (Asterinas) and M2
 - Kernel entry to `/init` 0.45 s (Asterinas) / 1.0 s (Linux) under QEMU TCG;
   application start 3 to 4 s under TCG.
 
-[Unreleased]: https://github.com/mkarrer/elixir_unikernel/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mkarrer/elixir_unikernel/releases/tag/v0.1.0
+[Unreleased]: https://github.com/bmalum/elixir_unikernel/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/bmalum/elixir_unikernel/releases/tag/v0.1.0

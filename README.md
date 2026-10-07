@@ -15,7 +15,7 @@ Interactive Elixir (1.20.4) - press Ctrl+C to exit (type h() ENTER for help)
 iex(1)>
 ```
 
-Website and manual: https://mkarrer.github.io/elixir_unikernel/ (built from
+Website and manual: https://bmalum.github.io/elixir_unikernel/ (built from
 `site/` and `docs/book/`; `make site` builds it locally).
 
 ## Quick start

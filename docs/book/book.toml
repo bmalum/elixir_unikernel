@@ -11,8 +11,8 @@ create-missing = false
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/mkarrer/elixir_unikernel"
-edit-url-template = "https://github.com/mkarrer/elixir_unikernel/edit/main/docs/book/{path}"
+git-repository-url = "https://github.com/bmalum/elixir_unikernel"
+edit-url-template = "https://github.com/bmalum/elixir_unikernel/edit/main/docs/book/{path}"
 site-url = "/elixir_unikernel/book/"
 no-section-label = true
 

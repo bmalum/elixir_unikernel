@@ -1,7 +1,7 @@
 # Build and first boot
 
 ```sh
-git clone https://github.com/mkarrer/elixir_unikernel.git
+git clone https://github.com/bmalum/elixir_unikernel.git
 cd elixir_unikernel
 make check          # host prerequisites
 make initramfs      # ~6 min cold, ~1 min when OTP/Elixir layers are cached
