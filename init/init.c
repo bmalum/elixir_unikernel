@@ -259,6 +259,11 @@ int main(void) {
 
     const char *mode = param("uniapp.mode");
     if (!mode) mode = "iex";
+    /* uniapp.code=embedded loads every module of the boot script up front (the
+       release default); interactive (default here) loads lazily and roughly
+       halves RSS. */
+    const char *code_mode = param("uniapp.code");
+    int embedded = code_mode && !strcmp(code_mode, "embedded");
     int iex = !strcmp(mode, "iex");
     int erl = !strcmp(mode, "erl");          /* debugging: plain Erlang shell, no Elixir CLI */
     const char *eval = param("uniapp.eval"); /* debugging: Erlang expression run at boot */
@@ -280,7 +285,7 @@ int main(void) {
     setenv("RELEASE_ROOT", root, 1);
     setenv("RELEASE_NAME", RELEASE_NAME, 1);
     setenv("RELEASE_VSN", RELEASE_VSN, 1);
-    setenv("RELEASE_MODE", "embedded", 1);
+    setenv("RELEASE_MODE", embedded ? "embedded" : "interactive", 1);
     setenv("RELEASE_NODE", RELEASE_NAME, 1);
     setenv("RELEASE_SYS_CONFIG", sysconfig, 1);
     setenv("ERL_CRASH_DUMP", "/dev/null", 1);
@@ -289,10 +294,17 @@ int main(void) {
     static char beam[256];
     snprintf(beam, sizeof beam, "%s/beam.smp", bindir);
 
-    const char *argv[48];
+    const char *argv[80];
     int n = 0;
     argv[n++] = beam;
     argv[n++] = "-Bd";                    /* emulator flag (erl +Bd): no ^C break menu on serial */
+    /* Extra emulator flags from the command line, e.g. uniapp.emu="-S 1 -Meamin"
+       (erl's "+X" flags are spelled "-X" when passed to beam.smp directly). */
+    const char *emu = param("uniapp.emu");
+    if (emu) {
+        char *tok, *dup = strdup(emu);
+        for (tok = strtok(dup, " "); tok && n < 40; tok = strtok(NULL, " ")) argv[n++] = tok;
+    }
     argv[n++] = "--";
     argv[n++] = "-root"; argv[n++] = root;
     argv[n++] = "-bindir"; argv[n++] = bindir;
@@ -302,7 +314,7 @@ int main(void) {
     argv[n++] = "--";
     argv[n++] = "-boot"; argv[n++] = boot;
     argv[n++] = "-boot_var"; argv[n++] = "RELEASE_LIB"; argv[n++] = libdir;
-    argv[n++] = "-mode"; argv[n++] = "embedded";
+    argv[n++] = "-mode"; argv[n++] = embedded ? "embedded" : "interactive";
     argv[n++] = "-config"; argv[n++] = sysconfig;
     if (!erl) argv[n++] = "-noshell";
     if (eval) { argv[n++] = "-eval"; argv[n++] = eval; }

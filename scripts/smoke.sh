@@ -8,8 +8,14 @@
 #   iex mode : IEx banner + prompt; typed expressions are evaluated
 # Prints boot timing. Exit code != 0 on any failure.
 set -uo pipefail
+trap '' PIPE   # writing Ctrl-a x into the FIFO of an already-dead QEMU must not kill us
 LABEL=$1; QEMU_CMD=$2; CMDLINE=$3
 TIMEOUT=${SMOKE_TIMEOUT:-240}
+# Asterinas under QEMU TCG occasionally stalls right after exec'ing beam.smp
+# (upstream kernel too, see RESEARCH.md). A boot that has not printed
+# "uniapp starting" within BOOT_TIMEOUT is killed and retried, up to ATTEMPTS.
+BOOT_TIMEOUT=${SMOKE_BOOT_TIMEOUT:-45}
+ATTEMPTS=${SMOKE_ATTEMPTS:-5}
 LOGDIR=${SMOKE_LOGDIR:-build/logs}; mkdir -p "$LOGDIR"
 TIMEOUT_BIN=timeout; command -v timeout >/dev/null || TIMEOUT_BIN=gtimeout
 fail=0
@@ -22,25 +28,34 @@ strip_ansi() { sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\x1bc//g' -e 's/\r$//'
 # Starts QEMU with stdin from a FIFO; types <input> once <wait-for-regex> is
 # seen on the console; stops when <stop-regex> appears or on timeout.
 run_vm() {
-  local mode waitre input stopre log fifo qpid typed t
+  local mode waitre input stopre log fifo qpid typed t attempt booted done_
   mode=$1; waitre=$2; input=$3; stopre=$4; log="$LOGDIR/$LABEL-$mode.log"
-  fifo=$(mktemp -u); mkfifo "$fifo"
-  : > "$log"
-  $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=$mode" < "$fifo" > "$log" 2>&1 &
-  qpid=$!
-  exec 3>"$fifo"            # keep the FIFO open for writing
-  typed=0; t=0
-  while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
-    sleep 1; t=$((t+1))
-    if [ $typed -eq 0 ] && grep -qE "$waitre" "$log"; then
-      sleep 2; printf '%s' "$input" >&3; typed=1
-    fi
-    if grep -qE "$stopre" "$log"; then sleep 2; break; fi
+  for attempt in $(seq 1 "$ATTEMPTS"); do
+    fifo=$(mktemp -u); mkfifo "$fifo"
+    : > "$log"
+    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=$mode" < "$fifo" > "$log" 2>&1 &
+    qpid=$!
+    exec 3>"$fifo"            # keep the FIFO open for writing
+    typed=0; t=0; booted=0; done_=0
+    while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
+      sleep 1; t=$((t+1))
+      [ $booted -eq 0 ] && grep -q 'uniapp starting' "$log" && booted=1
+      if [ $booted -eq 0 ] && [ $t -ge "$BOOT_TIMEOUT" ]; then break; fi   # stalled boot
+      if [ $typed -eq 0 ] && grep -qE "$waitre" "$log"; then
+        sleep 2; printf '%s' "$input" >&3; typed=1
+      fi
+      if grep -qE "$stopre" "$log"; then sleep 2; done_=1; break; fi
+      # typed, but no reaction within BOOT_TIMEOUT: stalled mid-run
+      if [ $typed -eq 1 ] && [ $t -ge $((BOOT_TIMEOUT * 2)) ]; then break; fi
+    done
+    printf '\001x' >&3 2>/dev/null   # Ctrl-a x: quit QEMU
+    exec 3>&-
+    sleep 1; kill $qpid 2>/dev/null; wait $qpid 2>/dev/null
+    rm -f "$fifo"
+    [ $done_ -eq 1 ] && break
+    echo "  info: $mode run stalled (booted=$booted) after ${t}s (attempt $attempt/$ATTEMPTS), retrying" >&2
+    cp "$log" "$log.stalled.$attempt"
   done
-  printf '\001x' >&3 2>/dev/null   # Ctrl-a x: quit QEMU
-  exec 3>&-
-  sleep 1; kill $qpid 2>/dev/null; wait $qpid 2>/dev/null
-  rm -f "$fifo"
   strip_ansi "$log"
   echo "$log.clean"
 }
@@ -65,17 +80,31 @@ PY
 echo "== $LABEL: app mode"
 # run_vm types <input> after <waitre>; we abuse the hook to run host clients instead.
 run_vm_app() {
-  local log="$LOGDIR/$LABEL-app.log" qpid t=0
-  : > "$log"
-  $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=app" < /dev/null > "$log" 2>&1 &
-  qpid=$!
-  while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
-    sleep 1; t=$((t+1))
-    if [ "$(grep -cE '^LISTEN (tcp|udp|tls) ' "$log")" -ge 3 ] && grep -q 'PROBE done' "$log"; then
-      sleep 2; client_checks > "$LOGDIR/$LABEL-clients.log"; break
-    fi
+  local log="$LOGDIR/$LABEL-app.log" qpid t attempt booted fifo
+  : > "$LOGDIR/$LABEL-clients.log"
+  for attempt in $(seq 1 "$ATTEMPTS"); do
+    fifo=$(mktemp -u); mkfifo "$fifo"
+    : > "$log"
+    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=app" < "$fifo" > "$log" 2>&1 &
+    qpid=$!
+    exec 3>"$fifo"
+    t=0; booted=0
+    while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
+      sleep 1; t=$((t+1))
+      [ $booted -eq 0 ] && grep -q 'uniapp starting' "$log" && booted=1
+      if [ $booted -eq 0 ] && [ $t -ge "$BOOT_TIMEOUT" ]; then break; fi
+      if [ "$(grep -cE '^LISTEN (tcp|udp|tls) ' "$log")" -ge 3 ] && grep -q 'PROBE done' "$log"; then
+        sleep 2; client_checks > "$LOGDIR/$LABEL-clients.log"; break
+      fi
+    done
+    printf '\001x' >&3 2>/dev/null
+    exec 3>&-
+    sleep 1; kill $qpid 2>/dev/null; wait $qpid 2>/dev/null
+    rm -f "$fifo"
+    [ $booted -eq 1 ] && break
+    echo "  info: app boot stalled after ${BOOT_TIMEOUT}s (attempt $attempt/$ATTEMPTS), retrying" >&2
+    cp "$log" "$log.stalled.$attempt"
   done
-  kill $qpid 2>/dev/null; wait $qpid 2>/dev/null
   strip_ansi "$log"; echo "$log.clean"
 }
 log=$(run_vm_app)

@@ -25,8 +25,16 @@ JOBS         ?= 8
 DOCKER       ?= docker
 PLATFORM     ?= $(shell docker version -f "{{.Server.Os}}/{{.Server.Arch}}" 2>/dev/null || echo linux/amd64)
 QEMU         ?= qemu-system-x86_64
-QEMU_MEM     ?= 256M
+# Measured floors (TCG, this image): Linux boots and passes all probes at 128M;
+# Asterinas needs more: 192M is marginal (boot sometimes hangs), 256M is reliable
+# (its kernel is linked at physical 128M, see RESEARCH.md).
+M0_MEM       ?= 128M
+M1_MEM       ?= 256M
 QEMU_SMP     ?= 2
+# Asterinas occasionally livelocks in the kernel (handle_pending_signal) while
+# ERTS starts its threads; more vCPUs make it rare (1 CPU: always, 2: ~50%,
+# 4: ~15%). The smoke test retries stalled boots. See docs/RESEARCH.md.
+M1_SMP       ?= 4
 QEMU_ACCEL   ?= $(shell if [ "$$(uname -s)" = Linux ] && [ -w /dev/kvm ]; then echo kvm; else echo tcg; fi)
 
 BUILD        := build
@@ -71,7 +79,7 @@ $(BUILD)/vmlinux-m0:
 # -cpu Icelake-Server: Asterinas requires x2APIC and a modern CPU model; works for Linux too.
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
-  -m $(QEMU_MEM) -smp $(QEMU_SMP) -nographic -no-reboot \
+  -nographic -no-reboot \
   -netdev user,id=n0,hostfwd=tcp::4000-:4000,hostfwd=udp::4001-:4001,hostfwd=tcp::4443-:4443 \
   -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off \
   -device virtio-rng-pci,disable-legacy=on,disable-modern=off \
@@ -80,13 +88,13 @@ QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu I
 M0_CMDLINE = console=ttyS0 quiet loglevel=3 rdinit=/init $(NET_ARGS)
 
 run-m0: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	$(QEMU_BASE) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=iex"
+	$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=iex"
 
 run-m0-app: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	$(QEMU_BASE) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=app"
+	$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=app"
 
 smoke-m0: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	scripts/smoke.sh m0 "$(QEMU_BASE) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)" "$(M0_CMDLINE)"
+	scripts/smoke.sh m0 "$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)" "$(M0_CMDLINE)"
 
 # ---------------------------------------------------------------- M1: Asterinas
 asterinas: $(BUILD)/asterinas/aster-nix-osdk-bin
@@ -96,13 +104,13 @@ $(BUILD)/asterinas/aster-nix-osdk-bin: scripts/build-asterinas.sh $(wildcard bui
 M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(NET_ARGS)
 
 run-m1: asterinas
-	$(QEMU_BASE) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=iex"
+	$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=iex"
 
 run-m1-app: asterinas
-	$(QEMU_BASE) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=app"
+	$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=app"
 
 smoke-m1: asterinas
-	scripts/smoke.sh m1 "$(QEMU_BASE) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS)" "$(M1_CMDLINE)"
+	scripts/smoke.sh m1 "$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS)" "$(M1_CMDLINE)"
 
 # ---------------------------------------------------------------- misc
 sizes: $(INITRAMFS)
