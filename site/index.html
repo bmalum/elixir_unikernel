@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>elixir_unikernel: boot straight into Elixir on a Rust kernel</title>
+<meta name="description" content="A mix release as a bootable image on the Asterinas kernel. 15 MB, three static binaries, TCP, UDP and TLS 1.3 over virtio-net. No Linux userland.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <a class="wordmark" href="./">elixir_unikernel</a>
+  <nav aria-label="Site">
+    <a href="book/">Manual</a>
+    <a href="book/getting-started/first-boot.html">Get started</a>
+    <a href="https://github.com/mkarrer/elixir_unikernel">Source</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <h1>Boot straight into Elixir on a Rust kernel.</h1>
+  <p class="lede">A <code>mix release</code> becomes a 15 MB machine image: a memory-safe kernel, one 300-line init program, and the Erlang VM. No shell, no init system, no dynamic loader. TCP, UDP and TLS 1.3 work on the first boot.</p>
+
+  <figure class="console" aria-label="Serial console transcript of a boot on Asterinas">
+    <figcaption>Serial console, Asterinas kernel, QEMU. Unedited apart from the kernel's ASCII logo.</figcaption>
+<pre><code><span class="k">[kernel]</span> initramfs is ready
+<span class="k">[kernel]</span> running /init as the init process
+<span class="i">[init]</span> elixir_unikernel init, uptime 0.560 s
+<span class="i">[init]</span> net: eth0 10.0.2.15/24 gw 10.0.2.2
+<span class="i">[init]</span> exec /rel/erts-17.1/bin/beam.smp (iex mode)
+Erlang/OTP 29 [erts-17.1] [source] [64-bit] [smp:2:2] [ds:2:2:10] [async-threads:1] [jit:ns]
+13:01:08.809 [info] uniapp starting (otp 29, elixir 1.20.4, uptime 3.80s)
+Interactive Elixir (1.20.4) - press Ctrl+C to exit (type h() ENTER for help)
+<span class="p">iex(1)&gt;</span> <span class="cursor" aria-hidden="true"></span></code></pre>
+  </figure>
+
+  <p class="actions">
+    <a class="button" href="book/getting-started/first-boot.html">Build and boot it</a>
+    <span class="hint"><code>git clone</code>, <code>make check</code>, <code>make run-m1</code>. About 15 minutes on a cold cache.</span>
+  </p>
+</section>
+
+<section class="prose" id="what">
+  <h2>What is in the image</h2>
+  <p>Three statically linked ELF files and the <code>.beam</code> files of your release. The build fails if anything else turns up.</p>
+  <div class="scroll"><table class="files">
+    <thead><tr><th scope="col">Path</th><th scope="col">Size</th><th scope="col">Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>/init</code></td><td>40 KB</td><td>PID 1. Mounts <code>/proc</code>, configures the NIC from the kernel command line, writes <code>inetrc</code> and <code>resolv.conf</code>, <code>exec</code>s the VM.</td></tr>
+      <tr><td><code>/rel/erts-17.1/bin/beam.smp</code></td><td>9.9 MB</td><td>Erlang/OTP 29.1.1, JIT, musl. OpenSSL 3.5, zlib, zstd and the <code>crypto</code> and <code>asn1</code> NIFs linked in.</td></tr>
+      <tr><td><code>/rel/erts-17.1/bin/erl_child_setup</code></td><td>59 KB</td><td>The helper ERTS starts for <code>Port</code>s. Present because ERTS insists; idle.</td></tr>
+      <tr><td><code>/rel/lib/*/ebin</code></td><td>11 MB</td><td><code>kernel</code>, <code>stdlib</code>, <code>ssl</code>, <code>elixir</code>, <code>iex</code>, your application.</td></tr>
+      <tr><td><code>/etc/ssl/cacert.pem</code></td><td>230 KB</td><td>CA bundle, so <code>:ssl.connect</code> with <code>verify_peer</code> works.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Compressed, that is a 9.4 MB <code>initramfs.cpio.gz</code>. The <a href="https://asterinas.github.io">Asterinas</a> kernel adds 5.8 MB. The same initramfs also boots on a stock Linux kernel, which is how kernel bugs get told apart from application bugs.</p>
+</section>
+
+<section class="prose" id="how">
+  <h2>How it boots</h2>
+  <ol class="steps">
+    <li>QEMU loads the kernel ELF and the initramfs. The kernel unpacks the cpio into a RAM file system and runs <code>/init</code>.</li>
+    <li><code>/init</code> does what a release's <code>bin/myapp</code> script and <code>erlexec</code> would do, in C with the arguments fixed at build time, then <code>execv</code>s <code>beam.smp</code>. It stays PID 1.</li>
+    <li>ERTS reads the release boot script, starts the applications and, in <code>iex</code> mode, the shell on the serial port. In <code>app</code> mode there is no shell at all.</li>
+  </ol>
+  <p>Name resolution goes through <code>inet_res</code>, OTP's resolver written in Erlang, so the <code>inet_gethost</code> port program is not needed. Everything configurable arrives on the kernel command line: <code>uniapp.mode=app</code>, <code>uniapp.ip=10.0.2.15/24</code>, <code>uniapp.dns=10.0.2.3</code>. Details in the <a href="book/reference/cmdline.html">command-line reference</a>.</p>
+</section>
+
+<section class="prose" id="numbers">
+  <h2>Measured</h2>
+  <p>QEMU 11 with TCG on an Apple M-series laptop, so x86-64 is emulated instruction by instruction. KVM will be faster; those numbers are not in yet.</p>
+  <div class="scroll"><table class="numbers">
+    <thead><tr><th scope="col"></th><th scope="col">Asterinas</th><th scope="col">Linux 6.1 (reference)</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Kernel entry to <code>/init</code></th><td>0.45 s</td><td>1.0 s</td></tr>
+      <tr><th scope="row">Application started</th><td>3 to 4 s</td><td>4 s</td></tr>
+      <tr><th scope="row">Minimum guest RAM, all tests passing</th><td>144 MB</td><td>128 MB</td></tr>
+      <tr><th scope="row"><code>beam.smp</code> RSS, idle sample app</th><td>62 MB</td><td>62 MB</td></tr>
+      <tr><th scope="row">Image + kernel</th><td>15.2 MB</td><td>9.4 MB + 44 MB vmlinux</td></tr>
+      <tr><th scope="row">TCP, UDP echo from the host</th><td>pass</td><td>pass</td></tr>
+      <tr><th scope="row">TLS 1.3 server (<code>openssl s_client</code>)</th><td>pass</td><td>pass</td></tr>
+      <tr><th scope="row">TLS 1.3 client, <code>verify_peer</code>, www.erlang.org</th><td>pass</td><td>pass</td></tr>
+      <tr><th scope="row">DNS via <code>inet_res</code></th><td>pass</td><td>pass</td></tr>
+    </tbody>
+  </table></div>
+  <p>These are the assertions of <code>make smoke</code>, which rebuilds everything from pinned git tags (<code>OTP-29.1.1</code>, <code>v1.20.4</code>, Asterinas <code>3d85cb4</code>) and runs in about twelve minutes. <a href="book/reference/limits.html">All measurements and limits.</a></p>
+</section>
+
+<section class="prose" id="kernel">
+  <h2>About the kernel</h2>
+  <p>Asterinas is a Linux-ABI compatible kernel written in Rust, with unsafe code confined to a small core. Because the ABI is Linux's, an unmodified OTP runs on it; this project changes nothing in ERTS. Two kernel bugs were found by running the BEAM on it and are carried as patches until they land upstream: wildcard <code>bind()</code> failed with <code>EADDRNOTAVAIL</code>, and a disarmed <code>timerfd</code> stayed readable, which made ERTS's poll thread spin and looked exactly like a kernel livelock. Both patches are a few lines; the second one is a one-liner with a <a href="book/internals/asterinas-patches.html">thirty-line C reproducer</a>.</p>
+  <p>This is not a unikernel in the strict sense: kernel and VM are two binaries with a syscall boundary. Everything else a Linux system ships is gone. A single-binary build on Hermit is the stretch goal; the <a href="book/internals/kernels.html">kernel notes</a> say what that would take.</p>
+</section>
+
+<section class="prose" id="not">
+  <h2>What it does not do</h2>
+  <ul class="plain">
+    <li>No persistent storage. The root is read-only, <code>/tmp</code> is RAM.</li>
+    <li>No external programs. <code>System.cmd/3</code> has nothing to run.</li>
+    <li>No NIFs loaded at runtime. OTP's own are linked in; yours would have to be too.</li>
+    <li>No Erlang distribution, no <code>epmd</code>, no DHCP, no IPv6 testing yet.</li>
+    <li>On Asterinas, the IP address is still compiled into the kernel; the command-line value is honoured on Linux only.</li>
+  </ul>
+  <p>Phoenix works within those limits: pure-BEAM dependencies, assets built in the Docker stage, configuration from the command line. There is a <a href="book/guide/phoenix.html">chapter on it</a>.</p>
+</section>
+
+<section class="prose" id="start">
+  <h2>Try it</h2>
+<pre class="shell"><code>git clone https://github.com/mkarrer/elixir_unikernel.git
+cd elixir_unikernel
+make check        # docker buildx, qemu-system-x86_64, coreutils
+make run-m1       # build, then boot into IEx. Ctrl-a x leaves QEMU.
+make smoke        # everything, both kernels, with assertions</code></pre>
+  <p>macOS on Apple Silicon works with Colima; the build runs natively on arm64 and cross-compiles only the ERTS binaries. Linux hosts with <code>/dev/kvm</code> get hardware acceleration automatically. The <a href="book/">manual</a> covers prerequisites, shipping your own release, troubleshooting, and the internals.</p>
+</section>
+
+</main>
+
+<footer>
+  <p>elixir_unikernel 0.1.0. Apache 2.0. Erlang/OTP, Elixir, OpenSSL and the Asterinas kernel keep their own licenses; see <a href="https://github.com/mkarrer/elixir_unikernel/blob/main/NOTICE">NOTICE</a>.</p>
+  <p><a href="book/">Manual</a> · <a href="book/contributing/changelog.html">Changelog</a> · <a href="https://github.com/mkarrer/elixir_unikernel/blob/main/SECURITY.md">Security</a> · <a href="https://github.com/mkarrer/elixir_unikernel">GitHub</a></p>
+</footer>
+
+</body>
+</html>

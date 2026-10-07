@@ -1,0 +1,24 @@
+[book]
+title = "elixir_unikernel"
+description = "Boot straight into Elixir on a Rust kernel. Manual."
+authors = ["elixir_unikernel contributors"]
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/mkarrer/elixir_unikernel"
+edit-url-template = "https://github.com/mkarrer/elixir_unikernel/edit/main/docs/book/{path}"
+site-url = "/elixir_unikernel/book/"
+no-section-label = true
+
+[output.html.search]
+limit-results = 20
+
+[output.html.fold]
+enable = true
+level = 1

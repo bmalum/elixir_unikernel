@@ -1,65 +1,62 @@
 # elixir_unikernel
 
-Boot straight into Elixir (IEx or your application) on a Rust kernel.
-No Linux userland, no shell, no init system: `/init` is a 300-line static C
-program that configures the NIC and `exec`s `beam.smp`.
+Boot straight into Elixir on a Rust kernel. A `mix release` becomes a 15 MB
+machine image: the [Asterinas](https://asterinas.github.io) kernel, a 300-line
+static `/init`, and the Erlang VM. No shell, no init system, no dynamic loader.
+TCP, UDP, TLS 1.3 and DNS work on the first boot.
 
-See [GOALS.md](GOALS.md) for the success criteria and
-[docs/RESEARCH.md](docs/RESEARCH.md) for why Asterinas (M1) and Hermit (M3).
-
-## Layout
-
-```
-builder/Dockerfile   static-musl OTP 29.1.1 + Elixir 1.20.4 + mix release (linux/amd64)
-app/                 sample app: TCP echo server + boot-time probes (udp, tcp, dns, tls, tls_srv)
-init/init.c          PID 1: mount, ifconfig from cmdline, inetrc, exec beam.smp
-scripts/             rootfs assembly, initramfs, kernels, smoke test, sizes
-Makefile             one entry point for everything
-.github/workflows    CI: build release -> M0 (Linux) and M1 (Asterinas) smoke tests
+```text
+[kernel] running /init as the init process
+[init] elixir_unikernel init, uptime 0.560 s
+[init] net: eth0 10.0.2.15/24 gw 10.0.2.2
+[init] exec /rel/erts-17.1/bin/beam.smp (iex mode)
+Erlang/OTP 29 [erts-17.1] [source] [64-bit] [smp:2:2] [ds:2:2:10] [async-threads:1] [jit:ns]
+Interactive Elixir (1.20.4) - press Ctrl+C to exit (type h() ENTER for help)
+iex(1)>
 ```
 
-## Build and run
+Website and manual: https://mkarrer.github.io/elixir_unikernel/ (built from
+`site/` and `docs/book/`; `make site` builds it locally).
 
-Requirements on the host: `docker` (buildx), `qemu-system-x86_64`, `make`.
-On an Apple Silicon Mac: `brew install colima docker docker-buildx qemu` and
-`colima start --vm-type vz --vz-rosetta`; the containers are `linux/amd64`.
+## Quick start
 
 ```sh
-make initramfs            # build/initramfs.cpio.gz  (static OTP + Elixir release)
-make run-m0               # stock Linux kernel, IEx on the serial console
-make run-m0-app           # same image, application mode (-noshell)
-make smoke-m0             # non-interactive assertions (probes, IEx prompt)
-make asterinas run-m1     # Rust kernel
-make smoke-m1 sizes
+make check        # host prerequisites: docker buildx, qemu-system-x86_64, coreutils
+make run-m1       # build everything (~15 min cold) and boot into IEx. Ctrl-a x exits QEMU.
+make run-m1-app   # application mode, no shell
+make smoke        # rebuild from pinned tags and run all assertions on both kernels
+make help         # every target
 ```
 
-Exit QEMU with `Ctrl-a x`. The guest's echo servers (tcp 4000, udp 4001,
-tls 4443) are forwarded to host ports 14000/14001/14443
-(`HOST_PORT_TCP/UDP/TLS` in the Makefile), e.g.
-`printf 'hi\n' | nc 127.0.0.1 14000`.
+While a VM runs, the guest's echo servers are reachable from the host:
+`printf 'hi\n' | nc 127.0.0.1 14000` (TCP), port 14001 (UDP), port 14443
+(TLS 1.3). See the manual's
+[first boot](docs/book/src/getting-started/first-boot.md) chapter.
 
-## Kernel command line
+## What is here
 
-| key | default | meaning |
-|---|---|---|
-| `uniapp.mode=iex\|app` | `iex` | IEx shell or application only (`-noshell`) |
-| `uniapp.ip=A.B.C.D/N` | `10.0.2.15/24` | static address for the first NIC |
-| `uniapp.gw=A.B.C.D` | `10.0.2.2` | default gateway |
-| `uniapp.dns=A.B.C.D` | `10.0.2.3` | nameserver for OTP's `inet_res` |
-| `uniapp.tls_host=HOST` | unset | enables the DNS + TLS 1.3 client probes against HOST:443 |
+| Path | |
+|---|---|
+| `builder/Dockerfile` | static x86-64 OTP 29.1.1 + Elixir 1.20.4 + release; native build, ERTS cross-compiled with clang |
+| `builder/asterinas-patches/` | two small kernel patches (wildcard `bind()`, `timerfd` readiness), with reproducers |
+| `init/init.c` | PID 1: mount, NIC config from the kernel command line, inetrc, `exec beam.smp` |
+| `app/` | sample release: TCP/UDP/TLS echo servers, DNS and TLS client probes |
+| `scripts/` | rootfs assembly, initramfs, kernel fetch/build, smoke test, dist bundle |
+| `docs/book/` | the manual (mdBook); `docs/RESEARCH.md` has the original research notes |
+| `site/` | landing page |
+| `GOALS.md` | success criteria and measured status |
 
-Defaults match QEMU user-mode networking.
+## Status
 
-## How the boot works
+0.1.0. Milestones M0 (stock Linux), M1 (Asterinas) and M2 (TLS, size and
+memory budgets, CI) are done; the stretch goal M3 (a true unikernel on
+Hermit) is not started. Measured: 9.4 MB image + 5.8 MB kernel; 128 MB RAM on
+Linux, 144 MB on Asterinas; 3 to 4 s to the IEx prompt under QEMU TCG. See
+[GOALS.md](GOALS.md) and the manual's
+[limits](docs/book/src/reference/limits.md) page.
 
-1. Kernel unpacks the initramfs and runs `/init`.
-2. `/init` mounts `proc`, `devtmpfs`, `sysfs`; sets `lo` and `eth0` up via
-   `SIOCSIFADDR`/`SIOCADDRT`; writes `/etc/inetrc` (`{lookup,[file,dns]}` so
-   OTP never spawns `inet_gethost`); exports `BINDIR`, `ROOTDIR`, `RELEASE_*`;
-   `exec`s `beam.smp` with the argv `erlexec` would have produced.
-3. ERTS boots the release boot script (`-mode embedded`); in IEx mode the
-   `-user elixir ... +iex` arguments start the shell on the serial console.
+## Contributing and licence
 
-`beam.smp` is the only process. ERTS still spawns its `erl_child_setup`
-helper (needed for `Port`s; it is kept and static). Nothing else is in the
-image: `scripts/assemble-rootfs.sh` fails if any other ELF is present.
+[CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
+[CHANGELOG.md](CHANGELOG.md). Apache 2.0 for this repository; bundled
+components keep their licences, listed in [NOTICE](NOTICE).

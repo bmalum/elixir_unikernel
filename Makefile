@@ -1,21 +1,8 @@
-# elixir_unikernel — build everything with `make`.
-#
-# Targets
-#   make release      static x86-64 OTP + Elixir + mix release -> build/rootfs
-#   make initramfs    cpio.gz of rootfs                        -> build/initramfs.cpio.gz
-#   make m0-kernel    stock Linux (Firecracker CI build) for M0   -> build/vmlinux-m0
-#   make run-m0       boot M0 under QEMU into IEx
-#   make run-m0-app   boot M0 under QEMU into the app (-noshell)
-#   make smoke-m0     non-interactive smoke test (app mode, probes)
-#   make asterinas    build the Asterinas kernel with our initramfs
-#   make run-m1       boot Asterinas into IEx
-#   make smoke-m1     Asterinas smoke test
-#   make sizes        print image sizes vs budget
-#   make smoke        all of the above: release, both kernels, both smoke tests
-#
-# All compilation happens in linux/amd64 containers; the host only needs
-# docker and qemu-system-x86_64.
+# elixir_unikernel: build, boot and test with `make`.
+# Run `make help` for the target list. Everything compiles inside Docker
+# containers; the host needs docker (buildx), qemu-system-x86_64 and make.
 
+VERSION      := $(shell cat VERSION)
 OTP_TAG      ?= OTP-29.1.1
 ELIXIR_TAG   ?= v1.20.4
 ALPINE       ?= 3.22
@@ -28,7 +15,7 @@ PLATFORM     ?= $(shell docker version -f "{{.Server.Os}}/{{.Server.Arch}}" 2>/d
 QEMU         ?= qemu-system-x86_64
 # Measured floors (TCG, this image): Linux passes all probes at 128M; Asterinas
 # at 144M (its kernel is loaded at physical 128M, so 128M is impossible by
-# construction, see docs/RESEARCH.md). 160M leaves some margin.
+# construction, see docs/book/src/reference/limits.md). 160M leaves some margin.
 M0_MEM       ?= 128M
 M1_MEM       ?= 160M
 QEMU_SMP     ?= 2
@@ -38,17 +25,42 @@ QEMU_ACCEL   ?= $(shell if [ "$$(uname -s)" = Linux ] && [ -w /dev/kvm ]; then e
 BUILD        := build
 ROOTFS       := $(BUILD)/rootfs
 INITRAMFS    := $(BUILD)/initramfs.cpio.gz
+KERNEL_M1    := $(BUILD)/asterinas/aster-nix-osdk-bin
 TLS_HOST     ?= www.erlang.org
 NET_ARGS     := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3 uniapp.tls_host=$(TLS_HOST)
 
-.PHONY: all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 asterinas run-m1 run-m1-app smoke-m1 sizes clean builder-image smoke
+# Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
+# High numbers so a developer's local `iex -S mix` on 4000 never collides with the smoke test.
+HOST_PORT_TCP ?= 14000
+HOST_PORT_UDP ?= 14001
+HOST_PORT_TLS ?= 14443
+export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
 
+.DEFAULT_GOAL := help
+.PHONY: help check all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 \
+        asterinas run-m1 run-m1-app smoke-m1 smoke sizes dist docs docs-serve site clean
+
+## help:        list targets
+help:
+	@echo "elixir_unikernel $(VERSION)  (OTP $(OTP_TAG), Elixir $(ELIXIR_TAG), Asterinas $(ASTERINAS_REF))"
+	@echo
+	@grep -E '^## [a-z0-9-]+:' $(MAKEFILE_LIST) | sed -E 's/^## /  /' | sort
+	@echo
+	@echo "Variables (override with make VAR=value): M1_MEM=$(M1_MEM) M1_SMP=$(M1_SMP) QEMU_ACCEL=$(QEMU_ACCEL) TLS_HOST=$(TLS_HOST)"
+	@echo "Manual: docs/book  (make docs; or https://<pages-url>/book/)"
+
+## check:       verify host prerequisites (docker buildx, qemu, make, coreutils)
+check:
+	@scripts/check-prereqs.sh
+
+## all:         build the initramfs (release + rootfs + cpio)
 all: initramfs
 
-# Everything, end to end: release -> initramfs -> both kernels -> both smoke tests.
+## smoke:       everything end to end: release, both kernels, both smoke tests, sizes
 smoke: smoke-m0 smoke-m1 sizes
 
 # ---------------------------------------------------------------- release
+## release:     static x86-64 OTP + Elixir + mix release        -> build/rootfs
 release:
 	rm -rf $(ROOTFS) && mkdir -p $(ROOTFS)
 	$(DOCKER) buildx build --platform $(PLATFORM) \
@@ -57,6 +69,7 @@ release:
 	  --target out --output type=local,dest=$(BUILD)/out -f builder/Dockerfile .
 	scripts/assemble-rootfs.sh $(BUILD)/out $(ROOTFS)
 
+## initramfs:   gzip cpio of the rootfs                          -> build/initramfs.cpio.gz
 initramfs: $(INITRAMFS)
 $(INITRAMFS): $(ROOTFS)/init
 	scripts/mkinitramfs.sh $(ROOTFS) $@
@@ -66,16 +79,11 @@ $(ROOTFS)/init:
 	$(MAKE) release
 
 # ---------------------------------------------------------------- M0: stock Linux
+## m0-kernel:   fetch the stock Linux reference kernel         -> build/vmlinux-m0
 m0-kernel: $(BUILD)/vmlinux-m0
 $(BUILD)/vmlinux-m0:
 	scripts/fetch-m0-kernel.sh $(BUILD)
 
-# Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
-# High numbers so a developer's local `iex -S mix` on 4000 never collides with the smoke test.
-HOST_PORT_TCP ?= 14000
-HOST_PORT_UDP ?= 14001
-HOST_PORT_TLS ?= 14443
-export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
 # -cpu Icelake-Server: Asterinas requires x2APIC and a modern CPU model; works for Linux too.
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
@@ -86,35 +94,66 @@ QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu I
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 M0_CMDLINE = console=ttyS0 quiet loglevel=3 rdinit=/init $(NET_ARGS)
+QEMU_M0 = $(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)
 
+## run-m0:      boot on Linux into IEx (exit QEMU: Ctrl-a x)
 run-m0: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=iex"
+	$(QEMU_M0) -append "$(M0_CMDLINE) uniapp.mode=iex"
 
+## run-m0-app:  boot on Linux into the application (no shell)
 run-m0-app: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS) -append "$(M0_CMDLINE) uniapp.mode=app"
+	$(QEMU_M0) -append "$(M0_CMDLINE) uniapp.mode=app"
 
+## smoke-m0:    automated assertions on Linux
 smoke-m0: $(INITRAMFS) $(BUILD)/vmlinux-m0
-	scripts/smoke.sh m0 "$(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)" "$(M0_CMDLINE)"
+	scripts/smoke.sh m0 "$(QEMU_M0)" "$(M0_CMDLINE)"
 
 # ---------------------------------------------------------------- M1: Asterinas
-asterinas: $(BUILD)/asterinas/aster-nix-osdk-bin
-$(BUILD)/asterinas/aster-nix-osdk-bin: scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
+## asterinas:   build the Asterinas kernel (+ local patches)    -> build/asterinas/
+asterinas: $(KERNEL_M1)
+$(KERNEL_M1): scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
 	scripts/build-asterinas.sh $(ASTERINAS_REF) $(abspath $(INITRAMFS)) $(abspath $(BUILD))
 
 M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(NET_ARGS)
+QEMU_M1 = $(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(KERNEL_M1) -initrd $(INITRAMFS)
 
+## run-m1:      boot on Asterinas into IEx (exit QEMU: Ctrl-a x)
 run-m1: asterinas
-	$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=iex"
+	$(QEMU_M1) -append "$(M1_CMDLINE) uniapp.mode=iex"
 
+## run-m1-app:  boot on Asterinas into the application (no shell)
 run-m1-app: asterinas
-	$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS) -append "$(M1_CMDLINE) uniapp.mode=app"
+	$(QEMU_M1) -append "$(M1_CMDLINE) uniapp.mode=app"
 
+## smoke-m1:    automated assertions on Asterinas
 smoke-m1: asterinas
-	scripts/smoke.sh m1 "$(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(BUILD)/asterinas/aster-nix-osdk-bin -initrd $(INITRAMFS)" "$(M1_CMDLINE)"
+	scripts/smoke.sh m1 "$(QEMU_M1)" "$(M1_CMDLINE)"
 
-# ---------------------------------------------------------------- misc
+# ---------------------------------------------------------------- dist, docs, misc
+## sizes:       print image sizes against the 40 MB budget
 sizes: $(INITRAMFS)
 	@scripts/sizes.sh $(BUILD)
 
+## dist:        versioned bundle (kernel, initramfs, run.sh, SHA256SUMS) -> dist/
+dist: $(INITRAMFS) $(KERNEL_M1)
+	scripts/dist.sh $(VERSION) $(BUILD) dist
+
+## docs:        build the manual with mdBook (Docker)          -> build/book/
+docs:
+	$(DOCKER) run --rm -v "$(CURDIR)":/repo -w /repo/docs/book peaceiris/mdbook:v0.5.0 build -d /repo/build/book
+	@echo "open build/book/index.html"
+
+## docs-serve:  serve the manual on http://localhost:3000 with live reload
+docs-serve:
+	$(DOCKER) run --rm -it -p 3000:3000 -v "$(CURDIR)":/repo -w /repo/docs/book peaceiris/mdbook:v0.5.0 serve -n 0.0.0.0
+
+## site:        assemble the website (landing page + manual)   -> build/site/
+site: docs
+	rm -rf $(BUILD)/site && mkdir -p $(BUILD)/site
+	cp -R site/. $(BUILD)/site/
+	cp -R $(BUILD)/book $(BUILD)/site/book
+	@echo "open build/site/index.html"
+
+## clean:       remove build/ and dist/
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) dist

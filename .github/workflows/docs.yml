@@ -1,0 +1,44 @@
+name: docs
+on:
+  push:
+    branches: [main]
+    paths: [ 'docs/book/**', 'site/**', 'CHANGELOG.md', '.github/workflows/docs.yml' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.5.0'
+      - name: build manual
+        run: mdbook build docs/book -d "$GITHUB_WORKSPACE/build/book"
+      - name: assemble site
+        run: |
+          mkdir -p build/site
+          cp -R site/. build/site/
+          cp -R build/book build/site/book
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

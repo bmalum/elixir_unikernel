@@ -3,3 +3,4 @@ app/_build/
 app/deps/
 *.log
 build.old/
+dist/

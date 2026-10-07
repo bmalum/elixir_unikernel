@@ -1,0 +1,19 @@
+elixir_unikernel
+
+Copyright 2026 the elixir_unikernel contributors.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project builds and redistributes the following components. Each keeps
+its own license; nothing here changes their terms.
+
+Erlang/OTP                  Apache License 2.0            https://github.com/erlang/otp
+Elixir                      Apache License 2.0            https://github.com/elixir-lang/elixir
+Asterinas kernel            Mozilla Public License 2.0    https://github.com/asterinas/asterinas
+                            (with the patches in builder/asterinas-patches/, same license)
+OpenSSL 3.5                 Apache License 2.0            statically linked into beam.smp
+zlib                        zlib License                  statically linked into beam.smp
+zstd                        BSD 3-Clause / GPLv2          statically linked into beam.smp
+musl libc                   MIT License                   statically linked into beam.smp, erl_child_setup, /init
+ca-certificates (Mozilla)   MPL 2.0                       /etc/ssl/cacert.pem in the image
+Linux (reference kernel)    GPLv2                         downloaded for `make run-m0`, not shipped in dist bundles
+Alpine Linux packages       various                       build environment only
