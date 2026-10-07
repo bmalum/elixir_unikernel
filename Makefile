@@ -1,7 +1,7 @@
 # elixir_unikernel — build everything with `make`.
 #
 # Targets
-#   make release      static-musl OTP + Elixir + mix release  -> build/rootfs
+#   make release      static x86-64 OTP + Elixir + mix release -> build/rootfs
 #   make initramfs    cpio.gz of rootfs                        -> build/initramfs.cpio.gz
 #   make m0-kernel    stock Linux (Firecracker CI build) for M0   -> build/vmlinux-m0
 #   make run-m0       boot M0 under QEMU into IEx
@@ -11,6 +11,7 @@
 #   make run-m1       boot Asterinas into IEx
 #   make smoke-m1     Asterinas smoke test
 #   make sizes        print image sizes vs budget
+#   make smoke        all of the above: release, both kernels, both smoke tests
 #
 # All compilation happens in linux/amd64 containers; the host only needs
 # docker and qemu-system-x86_64.
@@ -43,19 +44,15 @@ INITRAMFS    := $(BUILD)/initramfs.cpio.gz
 TLS_HOST     ?= www.erlang.org
 NET_ARGS     := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3 uniapp.tls_host=$(TLS_HOST)
 
-.PHONY: all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 asterinas run-m1 run-m1-app smoke-m1 sizes clean builder-image
+.PHONY: all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 asterinas run-m1 run-m1-app smoke-m1 sizes clean builder-image smoke
 
 all: initramfs
 
-# ---------------------------------------------------------------- release
-builder-image:
-	$(DOCKER) buildx build --platform $(PLATFORM) \
-	  --build-arg OTP_TAG=$(OTP_TAG) --build-arg ELIXIR_TAG=$(ELIXIR_TAG) \
-	  --build-arg ALPINE_VERSION=$(ALPINE) --build-arg JOBS=$(JOBS) \
-	  --target release -t elixir-unikernel-builder:$(OTP_TAG)-$(ELIXIR_TAG) \
-	  -f builder/Dockerfile .
+# Everything, end to end: release -> initramfs -> both kernels -> both smoke tests.
+smoke: smoke-m0 smoke-m1 sizes
 
-release: builder-image
+# ---------------------------------------------------------------- release
+release:
 	rm -rf $(ROOTFS) && mkdir -p $(ROOTFS)
 	$(DOCKER) buildx build --platform $(PLATFORM) \
 	  --build-arg OTP_TAG=$(OTP_TAG) --build-arg ELIXIR_TAG=$(ELIXIR_TAG) \

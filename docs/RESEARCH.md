@@ -190,8 +190,37 @@ only variable.
 - `-user elixir` (IEx) produced no output on v0.18.1 only because the app
   crash-loop halted the VM first; the Erlang shell path itself works.
 
-## 6. Size (estimate, to be measured in M0)
+### Asterinas livelock during ERTS start (2026-10-07, open)
 
-ERTS + kernel/stdlib/compiler/elixir/logger/crypto/ssl/public_key/asn1
-≈ 35–50 MB uncompressed, 12–18 MB as gzip cpio. Asterinas kernel size not yet
-measured.
+With QEMU TCG, booting the image on Asterinas `main` (3d85cb4, patched or
+unpatched) sometimes stalls right after `/init` execs `beam.smp`, or later
+while IEx evaluates its first expression. Diagnosis via the QEMU monitor
+(`info registers`): one vCPU spins in kernel mode at
+`aster_core::process::signal::handle_pending_signal` (10 of 12 samples), the
+other vCPUs are idle; QEMU itself is fine (100 % of one host core). During
+that window ERTS has just created ~15 threads and issued ~70 `rt_sigaction`
+and ~95 `rt_sigprocmask` calls; no signal is ever sent (`kill`/`tgkill`
+absent). Frequency depends on vCPU count: 1 vCPU always stalls, 2 vCPUs
+roughly every second boot, 4 vCPUs about 1 in 6. Not reproducible with a C
+test program doing pipe/epoll/eventfd wake-ups, and the vDSO clock advances
+normally. Mitigation here: `-smp 4` for M1 and boot/run retries in
+`scripts/smoke.sh`; to be reported upstream with these notes.
+
+### Memory and boot time (2026-10-07)
+
+- `-mode embedded` loads all 742 modules at boot: `beam.smp` RSS 116 MB.
+  `-mode interactive` (now the default in `/init`, `uniapp.code=embedded`
+  restores the old behaviour) loads 234 and halves RSS to 62 MB; application
+  start moves from ~9 s to ~4 s of guest time under TCG.
+- Linux: boots and passes all probes at 128 MB; OOM at 128 MB with embedded
+  mode. Asterinas: 256 MB reliable, 224 MB works, 192 MB marginal, 160 MB
+  kernel heap exhaustion.
+- `+Meamin` (minimal allocators) only saves ~3 MB here; not used.
+
+## 6. Size (measured 2026-10-07)
+
+initramfs.cpio.gz 9.4 MB (rootfs 22 MB uncompressed: ERTS 9.9 MB static
+`beam.smp` + 12 OTP/Elixir apps with stripped beams + 0.2 MB CA bundle);
+Asterinas kernel 5.8 MB (release, stripped); total 15.2 MB against the 40 MB
+budget. The Linux reference kernel is 44 MB (uncompressed vmlinux, debug
+info) and not part of the product.
