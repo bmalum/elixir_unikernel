@@ -149,6 +149,7 @@ docs-serve:
 
 ## site:        assemble the website (landing page + manual)   -> build/site/
 site: docs
+	@test -n "$(BUILD)" && test "$(BUILD)/site" != "site"   # never touch the source dir
 	rm -rf $(BUILD)/site && mkdir -p $(BUILD)/site
 	cp -R site/. $(BUILD)/site/
 	cp -R $(BUILD)/book $(BUILD)/site/book
