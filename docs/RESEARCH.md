@@ -171,6 +171,25 @@ only variable.
   ~13 MB above that; `-m 128M` prints nothing, `-m 144M` and up boot. Kernel
   ELF is 5.3 MB (release, stripped).
 
+### M1 findings on Asterinas (2026-10-07)
+
+- v0.18.1 boots our initramfs and runs the static `beam.smp` as PID 1; OTP 29
+  + Elixir 1.20.4 start, the Erlang shell works on the serial console.
+- `bind()` to `INADDR_ANY` (0.0.0.0) fails with `EADDRNOTAVAIL` on v0.18.1
+  (`net/socket/ip/common.rs:get_iface_to_bind` only matches an interface
+  address); binding 10.0.2.15 or 127.0.0.1 works. `gen_tcp:listen(Port, [])`
+  therefore fails and, with a permanent app, takes the VM down. Upstream
+  `main` (Oct 2026) adds a regression test that binds `INADDR_ANY`
+  (`test/.../tcp_err.c`), so we pin `3d85cb4` instead of the tag.
+- No interface SET ioctls (`SIOCSIFADDR`, `SIOCSIFFLAGS`, `SIOCADDRT` return
+  `ENOTTY`); addresses are configured in-kernel (`net/iface/init.rs`:
+  10.0.2.15/24 on eth0, gateway 10.0.2.2, 127.0.0.1 on lo). `/init` logs and
+  continues. `inet:getifaddrs/0` returns `{error, eaddrnotavail}` on v0.18.1.
+- `/dev` is populated by the kernel; `mount -t devtmpfs` returns `ENODEV`
+  (harmless). `clock_getres` (syscall 229) is unimplemented (musl falls back).
+- `-user elixir` (IEx) produced no output on v0.18.1 only because the app
+  crash-loop halted the VM first; the Erlang shell path itself works.
+
 ## 6. Size (estimate, to be measured in M0)
 
 ERTS + kernel/stdlib/compiler/elixir/logger/crypto/ssl/public_key/asn1

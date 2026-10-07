@@ -1,14 +1,25 @@
 defmodule Uniapp.Echo do
-  @moduledoc "Minimal TCP echo server: proves :gen_tcp listen/accept inside the image."
+  @moduledoc """
+  Minimal TCP echo server: proves :gen_tcp listen/accept inside the image.
+  A failing listen is logged and retried instead of crashing the supervisor
+  (on a new kernel a missing socket feature must not take the whole VM down).
+  """
   use Task, restart: :permanent
   require Logger
 
   def start_link(opts), do: Task.start_link(__MODULE__, :run, [Keyword.fetch!(opts, :port)])
 
   def run(port) do
-    {:ok, lsock} = :gen_tcp.listen(port, [:binary, packet: :line, active: false, reuseaddr: true, ip: {0, 0, 0, 0}])
-    Logger.info("echo: listening on tcp/#{port}")
-    accept_loop(lsock)
+    case :gen_tcp.listen(port, [:binary, packet: :line, active: false, reuseaddr: true]) do
+      {:ok, lsock} ->
+        Logger.info("echo: listening on tcp/#{port}")
+        accept_loop(lsock)
+
+      {:error, reason} ->
+        Logger.error("echo: listen on tcp/#{port} failed: #{inspect(reason)}; retrying in 5s")
+        Process.sleep(5_000)
+        run(port)
+    end
   end
 
   defp accept_loop(lsock) do

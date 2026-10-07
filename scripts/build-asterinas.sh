@@ -17,8 +17,11 @@ SRC=$BUILD/asterinas-src
 mkdir -p "$BUILD/asterinas"
 
 if [ ! -d "$SRC/.git" ]; then
-  git clone --depth 1 --branch "$REF" https://github.com/asterinas/asterinas.git "$SRC"
+  git clone --filter=blob:none https://github.com/asterinas/asterinas.git "$SRC"
 fi
+git -C "$SRC" fetch -q origin "$REF" 2>/dev/null || git -C "$SRC" fetch -q origin
+git -C "$SRC" checkout -q --detach "$REF" || git -C "$SRC" checkout -q --detach FETCH_HEAD
+echo "asterinas at $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
 DEV_IMAGE="asterinas/dev:$(cat "$SRC/DOCKER_IMAGE_VERSION")"
 echo "asterinas $REF, dev image $DEV_IMAGE"
 

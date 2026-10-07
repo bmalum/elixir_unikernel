@@ -18,7 +18,8 @@
 OTP_TAG      ?= OTP-29.1.1
 ELIXIR_TAG   ?= v1.20.4
 ALPINE       ?= 3.22
-ASTERINAS_REF ?= v0.18.1
+# v0.18.1 cannot bind INADDR_ANY (EADDRNOTAVAIL); fixed on main after Aug 2026.
+ASTERINAS_REF ?= 3d85cb4
 JOBS         ?= 8
 
 DOCKER       ?= docker

@@ -76,17 +76,19 @@ static void read_cmdline(void) {
 /* value of key=... from cmdline, or NULL. Returned string is heap-allocated
    (never freed; init runs once). */
 static const char *param(const char *key) {
-    char buf[256];
+    char buf[1024];
     size_t kl = strlen(key);
     const char *p = cmdline;
     while (*p) {
         while (*p == ' ') p++;
-        const char *end = p;
-        while (*end && *end != ' ') end++;
+        /* token ends at the next space outside double quotes */
+        const char *end = p; int q = 0;
+        while (*end && (q || *end != ' ')) { if (*end == '"') q = !q; end++; }
         if ((size_t)(end - p) > kl && !memcmp(p, key, kl) && p[kl] == '=') {
-            size_t vl = end - p - kl - 1;
+            const char *v = p + kl + 1; size_t vl = end - v;
+            if (vl >= 2 && v[0] == '"' && v[vl - 1] == '"') { v++; vl -= 2; }
             if (vl >= sizeof buf) vl = sizeof buf - 1;
-            memcpy(buf, p + kl + 1, vl);
+            memcpy(buf, v, vl);
             buf[vl] = 0;
             return strdup(buf);
         }
@@ -256,7 +258,10 @@ int main(void) {
     setup_inetrc();
 
     const char *mode = param("uniapp.mode");
-    int iex = !(mode && !strcmp(mode, "app"));
+    if (!mode) mode = "iex";
+    int iex = !strcmp(mode, "iex");
+    int erl = !strcmp(mode, "erl");          /* debugging: plain Erlang shell, no Elixir CLI */
+    const char *eval = param("uniapp.eval"); /* debugging: Erlang expression run at boot */
 
     const char *root = RELEASE_ROOT;
     static char bindir[256], boot[256], sysconfig[256], libdir[256];
@@ -299,17 +304,20 @@ int main(void) {
     argv[n++] = "-boot_var"; argv[n++] = "RELEASE_LIB"; argv[n++] = libdir;
     argv[n++] = "-mode"; argv[n++] = "embedded";
     argv[n++] = "-config"; argv[n++] = sysconfig;
-    argv[n++] = "-noshell";
+    if (!erl) argv[n++] = "-noshell";
+    if (eval) { argv[n++] = "-eval"; argv[n++] = eval; }
     if (iex) {
         argv[n++] = "-user"; argv[n++] = "elixir";
         argv[n++] = "-extra"; argv[n++] = "--no-halt"; argv[n++] = "+iex";
+    } else if (erl) {
+        /* Erlang shell on the console; nothing Elixir-specific started. */
     } else {
         argv[n++] = "-s"; argv[n++] = "elixir"; argv[n++] = "start_cli";
         argv[n++] = "-extra"; argv[n++] = "--no-halt";
     }
     argv[n] = NULL;
 
-    logmsg("exec %s (%s mode)", beam, iex ? "iex" : "app");
+    logmsg("exec %s (%s mode)", beam, mode);
 
     /* exec keeps us PID 1. ERTS reaps its own erl_child_setup. */
     execv(beam, (char *const *)argv);
