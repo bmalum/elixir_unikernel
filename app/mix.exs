@@ -19,11 +19,20 @@ defmodule Uniapp.MixProject do
     ]
   end
 
+  defp erts do
+    case System.get_env("UNIAPP_ERTS") do
+      nil -> true
+      root -> root |> Path.join("erts-*") |> Path.wildcard() |> List.first() || raise "no erts-* in #{root}"
+    end
+  end
+
   defp releases do
     [
       uniapp: [
         include_executables_for: [],
-        include_erts: true,
+        # UNIAPP_ERTS points at a (cross-compiled) OTP root; Mix then takes both
+        # ERTS and the OTP applications from there. Unset = host OTP.
+        include_erts: erts(),
         strip_beams: true,
         # bin/uniapp is never used: /init starts beam.smp directly.
         steps: [:assemble, &Uniapp.ReleaseSteps.prune/1]

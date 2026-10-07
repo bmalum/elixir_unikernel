@@ -22,13 +22,14 @@ strip_ansi() { sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\x1bc//g' -e 's/\r$//'
 # Starts QEMU with stdin from a FIFO; types <input> once <wait-for-regex> is
 # seen on the console; stops when <stop-regex> appears or on timeout.
 run_vm() {
-  local mode=$1 waitre=$2 input=$3 stopre=$4 log="$LOGDIR/$LABEL-$mode.log"
-  local fifo; fifo=$(mktemp -u); mkfifo "$fifo"
+  local mode waitre input stopre log fifo qpid typed t
+  mode=$1; waitre=$2; input=$3; stopre=$4; log="$LOGDIR/$LABEL-$mode.log"
+  fifo=$(mktemp -u); mkfifo "$fifo"
   : > "$log"
   $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=$mode" < "$fifo" > "$log" 2>&1 &
-  local qpid=$!
+  qpid=$!
   exec 3>"$fifo"            # keep the FIFO open for writing
-  local typed=0 t=0
+  typed=0; t=0
   while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
     sleep 1; t=$((t+1))
     if [ $typed -eq 0 ] && grep -qE "$waitre" "$log"; then
@@ -64,8 +65,8 @@ echo "== $LABEL: iex mode"
 log=$(run_vm iex 'iex\([^)]*\)[0-9]*>' $'IO.puts(1 + 2)\nIO.puts("otp=" <> System.otp_release())\n' 'otp=[0-9]+')
 grep -qE 'Interactive Elixir \(1\.20' "$log" && ok "IEx banner (Elixir 1.20)" || bad "no IEx banner"
 grep -qE 'iex\([^)]*\)[0-9]*>'        "$log" && ok "IEx prompt"                || bad "no IEx prompt"
-grep -qE '^3$'                        "$log" && ok "evaluated 1 + 2"           || bad "1 + 2 not evaluated"
-grep -qE '^otp=29$'                   "$log" && ok "OTP 29"                    || bad "otp_release != 29"
+grep -qE '^(iex\([^)]*\)[0-9]*> )?3$'  "$log" && ok "evaluated 1 + 2"           || bad "1 + 2 not evaluated"
+grep -qE '(^|> )otp=29$'               "$log" && ok "OTP 29"                    || bad "otp_release != 29"
 
 if grep -q 'uptime' "$log"; then
   echo "  info: kernel entry -> /init: $(grep -o 'uptime [0-9.]* s' "$log" | head -1)"

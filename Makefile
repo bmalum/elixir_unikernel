@@ -22,7 +22,7 @@ ASTERINAS_REF ?= v0.18.1
 JOBS         ?= 8
 
 DOCKER       ?= docker
-PLATFORM     ?= linux/amd64
+PLATFORM     ?= $(shell docker version -f "{{.Server.Os}}/{{.Server.Arch}}" 2>/dev/null || echo linux/amd64)
 QEMU         ?= qemu-system-x86_64
 QEMU_MEM     ?= 256M
 QEMU_SMP     ?= 2
