@@ -32,10 +32,7 @@ QEMU         ?= qemu-system-x86_64
 M0_MEM       ?= 128M
 M1_MEM       ?= 256M
 QEMU_SMP     ?= 2
-# Asterinas occasionally livelocks in the kernel (handle_pending_signal) while
-# ERTS starts its threads; more vCPUs make it rare (1 CPU: always, 2: ~50%,
-# 4: ~15%). The smoke test retries stalled boots. See docs/RESEARCH.md.
-M1_SMP       ?= 4
+M1_SMP       ?= 2
 QEMU_ACCEL   ?= $(shell if [ "$$(uname -s)" = Linux ] && [ -w /dev/kvm ]; then echo kvm; else echo tcg; fi)
 
 BUILD        := build
@@ -73,11 +70,17 @@ m0-kernel: $(BUILD)/vmlinux-m0
 $(BUILD)/vmlinux-m0:
 	scripts/fetch-m0-kernel.sh $(BUILD)
 
+# Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
+# High numbers so a developer's local `iex -S mix` on 4000 never collides with the smoke test.
+HOST_PORT_TCP ?= 14000
+HOST_PORT_UDP ?= 14001
+HOST_PORT_TLS ?= 14443
+export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
 # -cpu Icelake-Server: Asterinas requires x2APIC and a modern CPU model; works for Linux too.
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
   -nographic -no-reboot \
-  -netdev user,id=n0,hostfwd=tcp::4000-:4000,hostfwd=udp::4001-:4001,hostfwd=tcp::4443-:4443 \
+  -netdev user,id=n0,hostfwd=tcp::$(HOST_PORT_TCP)-:4000,hostfwd=udp::$(HOST_PORT_UDP)-:4001,hostfwd=tcp::$(HOST_PORT_TLS)-:4443 \
   -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off \
   -device virtio-rng-pci,disable-legacy=on,disable-modern=off \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04

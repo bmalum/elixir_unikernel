@@ -33,7 +33,10 @@ make asterinas run-m1     # Rust kernel
 make smoke-m1 sizes
 ```
 
-Exit QEMU with `Ctrl-a x`.
+Exit QEMU with `Ctrl-a x`. The guest's echo servers (tcp 4000, udp 4001,
+tls 4443) are forwarded to host ports 14000/14001/14443
+(`HOST_PORT_TCP/UDP/TLS` in the Makefile), e.g.
+`printf 'hi\n' | nc 127.0.0.1 14000`.
 
 ## Kernel command line
 
