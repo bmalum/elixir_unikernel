@@ -190,21 +190,26 @@ only variable.
 - `-user elixir` (IEx) produced no output on v0.18.1 only because the app
   crash-loop halted the VM first; the Erlang shell path itself works.
 
-### Asterinas livelock during ERTS start (2026-10-07, open)
+### Asterinas "livelock" during ERTS start (2026-10-07, root-caused, patched)
 
-With QEMU TCG, booting the image on Asterinas `main` (3d85cb4, patched or
-unpatched) sometimes stalls right after `/init` execs `beam.smp`, or later
-while IEx evaluates its first expression. Diagnosis via the QEMU monitor
-(`info registers`): one vCPU spins in kernel mode at
-`aster_core::process::signal::handle_pending_signal` (10 of 12 samples), the
-other vCPUs are idle; QEMU itself is fine (100 % of one host core). During
-that window ERTS has just created ~15 threads and issued ~70 `rt_sigaction`
-and ~95 `rt_sigprocmask` calls; no signal is ever sent (`kill`/`tgkill`
-absent). Frequency depends on vCPU count: 1 vCPU always stalls, 2 vCPUs
-roughly every second boot, 4 vCPUs about 1 in 6. Not reproducible with a C
-test program doing pipe/epoll/eventfd wake-ups, and the vDSO clock advances
-normally. Mitigation here: `-smp 4` for M1 and boot/run retries in
-`scripts/smoke.sh`; to be reported upstream with these notes.
+Symptom: with QEMU TCG the image sometimes stalled after `/init` exec'd
+`beam.smp`, or later mid-run; 1 vCPU always, 2 vCPUs ~50 %, 4 vCPUs ~15 %.
+QEMU monitor samples first pointed at `handle_pending_signal`, but with more
+samples the hot path is `epoll_pwait` → `ReadySet::poll` → `TimerfdFile::poll`:
+ERTS's poll thread was looping on `epoll_wait` at 100 % CPU, starving the
+schedulers.
+
+Root cause (reproduced with a 30-line C program, `build/clk/init.c`): ERTS
+arms a `timerfd` with `timerfd_settime`, calls `epoll_wait(-1)`, then disarms
+with `timerfd_settime(0)` and never `read()`s the fd. On Asterinas
+`TimerfdFile::set_time` resets the expiration counter but does not invalidate
+the `Pollee`'s cached readiness, so epoll keeps reporting `IN` for an already
+disarmed timer: 19 of 20 `epoll_wait` calls returned in 0 ms (Linux: 0 of
+20). Fix: `self.pollee.invalidate()` after `ticks.store(0)`
+(`builder/asterinas-patches/0002-timerfd-settime-invalidate-readiness.patch`,
+one line). After the patch: 0 spurious wake-ups, 8/8 clean boots at 1 and 2
+vCPUs, and the Asterinas memory floor drops from 256 MB to 144 MB because the
+runaway poll thread no longer exhausts the kernel heap.
 
 ### Memory and boot time (2026-10-07)
 
@@ -213,8 +218,8 @@ normally. Mitigation here: `-smp 4` for M1 and boot/run retries in
   restores the old behaviour) loads 234 and halves RSS to 62 MB; application
   start moves from ~9 s to ~4 s of guest time under TCG.
 - Linux: boots and passes all probes at 128 MB; OOM at 128 MB with embedded
-  mode. Asterinas: 256 MB reliable, 224 MB works, 192 MB marginal, 160 MB
-  kernel heap exhaustion.
+  mode. Asterinas (with patch 0002): all probes pass at 144 MB; 136 MB prints
+  nothing because the kernel is loaded at physical 0x8000000 (128 MB).
 - `+Meamin` (minimal allocators) only saves ~3 MB here; not used.
 
 ## 6. Size (measured 2026-10-07)

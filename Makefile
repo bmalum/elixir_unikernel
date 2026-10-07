@@ -26,11 +26,11 @@ JOBS         ?= 8
 DOCKER       ?= docker
 PLATFORM     ?= $(shell docker version -f "{{.Server.Os}}/{{.Server.Arch}}" 2>/dev/null || echo linux/amd64)
 QEMU         ?= qemu-system-x86_64
-# Measured floors (TCG, this image): Linux boots and passes all probes at 128M;
-# Asterinas needs more: 192M is marginal (boot sometimes hangs), 256M is reliable
-# (its kernel is linked at physical 128M, see RESEARCH.md).
+# Measured floors (TCG, this image): Linux passes all probes at 128M; Asterinas
+# at 144M (its kernel is loaded at physical 128M, so 128M is impossible by
+# construction, see docs/RESEARCH.md). 160M leaves some margin.
 M0_MEM       ?= 128M
-M1_MEM       ?= 256M
+M1_MEM       ?= 160M
 QEMU_SMP     ?= 2
 M1_SMP       ?= 2
 QEMU_ACCEL   ?= $(shell if [ "$$(uname -s)" = Linux ] && [ -w /dev/kvm ]; then echo kvm; else echo tcg; fi)

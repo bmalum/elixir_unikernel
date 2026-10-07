@@ -17,13 +17,14 @@ QEMU TCG). Measured against the criteria below:
 | 1 | IEx prompt on serial, OTP 29.1.1 + Elixir 1.20.4 | yes, on Linux and Asterinas. Boot time under TCG (x86 emulated on arm64): kernel entry to `/init` 0.5 s (Asterinas) / 1.0 s (Linux); to application start 3–4 s; the 2 s target is not met under emulation and is not yet measured on KVM |
 | 2 | app mode via `uniapp.mode=app`, no shell | yes |
 | 3 | `:gen_tcp`/`:gen_udp` listen + connect over virtio-net, `:ssl.connect` TLS 1.3 with CA verification, `:ssl.listen` accepting a client, `inet_res` DNS | yes on both kernels; servers are exercised from the host through QEMU port forwards, TLS client against www.erlang.org |
-| 4 | kernel + initramfs ≤ 40 MB, 128 MB RAM | 9.4 MB initramfs + 5.8 MB Asterinas kernel = 15.2 MB. Linux passes everything at 128 MB; Asterinas needs 256 MB (its kernel is linked at physical 128 MB, floor measured at 192–224 MB) |
+| 4 | kernel + initramfs ≤ 40 MB, 128 MB RAM | 9.4 MB initramfs + 5.8 MB Asterinas kernel = 15.2 MB. Linux passes everything at 128 MB; Asterinas at 144 MB (its kernel is loaded at physical address 128 MB, so a 128 MB guest cannot hold it regardless of our image) |
 | 5 | userland = ERTS only | 3 ELFs in the image (`/init`, `beam.smp`, `erl_child_setup`), all static; `scripts/assemble-rootfs.sh` enforces it |
 | 6 | one `make`, pinned tags, CI smoke | `make smoke` from an empty `build/`; `.github/workflows/smoke.yml` |
 
-Known issue: Asterinas (upstream `main`, with and without our patch) occasionally
-livelocks in the kernel (`handle_pending_signal`) while ERTS starts; the smoke
-test retries stalled boots and reports it. See docs/RESEARCH.md.
+Two small Asterinas kernel patches are applied by the build
+(`builder/asterinas-patches/`): bind() to 0.0.0.0, and a `timerfd_settime`
+readiness bug that made ERTS's poll thread spin at 100 % (looked like a kernel
+livelock). Both are candidates for upstreaming; see docs/RESEARCH.md.
 
 ## MVP success criteria
 
