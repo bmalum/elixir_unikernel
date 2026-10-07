@@ -72,7 +72,7 @@ $(BUILD)/vmlinux-m0:
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
   -m $(QEMU_MEM) -smp $(QEMU_SMP) -nographic -no-reboot \
-  -netdev user,id=n0,hostfwd=tcp::4000-:4000 \
+  -netdev user,id=n0,hostfwd=tcp::4000-:4000,hostfwd=udp::4001-:4001,hostfwd=tcp::4443-:4443 \
   -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off \
   -device virtio-rng-pci,disable-legacy=on,disable-modern=off \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
@@ -89,7 +89,8 @@ smoke-m0: $(INITRAMFS) $(BUILD)/vmlinux-m0
 	scripts/smoke.sh m0 "$(QEMU_BASE) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)" "$(M0_CMDLINE)"
 
 # ---------------------------------------------------------------- M1: Asterinas
-asterinas: $(INITRAMFS)
+asterinas: $(BUILD)/asterinas/aster-nix-osdk-bin
+$(BUILD)/asterinas/aster-nix-osdk-bin: scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
 	scripts/build-asterinas.sh $(ASTERINAS_REF) $(abspath $(INITRAMFS)) $(abspath $(BUILD))
 
 M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(NET_ARGS)

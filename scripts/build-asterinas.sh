@@ -2,7 +2,7 @@
 # build-asterinas.sh <git-ref> <initramfs.cpio.gz> <build-dir>
 #
 # Builds the Asterinas kernel inside the upstream dev container with
-#   cargo osdk build --release --boot-method qemu-direct --grub-boot-protocol multiboot
+#   cargo osdk build --release --boot-method vmm-direct --grub-boot-protocol multiboot
 # which yields a multiboot ELF that plain QEMU boots with
 # `-kernel <elf> -initrd <cpio.gz> -append "<cmdline>"`. (The bzImage/"linux"
 # protocol variant did not produce any output under QEMU TCG on a Mac host;
@@ -22,6 +22,13 @@ fi
 git -C "$SRC" fetch -q origin "$REF" 2>/dev/null || git -C "$SRC" fetch -q origin
 git -C "$SRC" checkout -q --detach "$REF" || git -C "$SRC" checkout -q --detach FETCH_HEAD
 echo "asterinas at $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
+# Local patches (see builder/asterinas-patches/*.patch for the rationale).
+git -C "$SRC" checkout -q -- .
+PATCHES=$(cd "$(dirname "$0")/../builder/asterinas-patches" && pwd)
+for p in "$PATCHES"/*.patch; do
+  [ -f "$p" ] || continue
+  git -C "$SRC" apply "$p" && echo "applied $(basename "$p")"
+done
 DEV_IMAGE="asterinas/dev:$(cat "$SRC/DOCKER_IMAGE_VERSION")"
 echo "asterinas $REF, dev image $DEV_IMAGE"
 
@@ -40,13 +47,17 @@ docker run --rm --platform linux/amd64 \
     # Touch the marker so make does not rebuild it.
     mkdir -p test/initramfs/build
     make install_osdk 2>&1 | tail -3
-    cd kernel && cargo osdk build --release --boot-method qemu-direct --grub-boot-protocol multiboot --strip-elf \
+    cd kernel && cargo osdk build --release --boot-method vmm-direct --grub-boot-protocol multiboot --strip-elf \
         --initramfs=/root/asterinas/test/initramfs/build/initramfs.cpio.gz \
         --kcmd-args="console=ttyS0" 2>&1 | tail -15
     ls -l /root/asterinas/target/osdk/asterinas/
   '
-BIN=$SRC/target/osdk/asterinas/asterinas-osdk-bin.qemu_elf
-[ -f "$BIN" ] || { echo "kernel binary not found: $BIN"; ls "$SRC/target/osdk/asterinas/"; exit 1; }
+# Output name differs between versions (.qemu_elf on v0.18.x, .elf on main).
+BIN=
+for c in "$SRC"/target/osdk/asterinas/asterinas-osdk-bin.qemu_elf "$SRC"/target/osdk/asterinas/asterinas-osdk-bin.elf; do
+  [ -f "$c" ] && BIN=$c && break
+done
+[ -n "$BIN" ] || { echo "kernel binary not found"; ls "$SRC/target/osdk/asterinas/"; exit 1; }
 # OSDK already rewrote e_machine to EM_386 so QEMU accepts the 64-bit multiboot ELF.
 python3 - "$BIN" <<'PY'
 import sys; b=open(sys.argv[1],'rb').read(20); assert b[:4]==b'\x7fELF', "not an ELF"; print("e_machine =", b[18] | (b[19]<<8), "(3 = EM_386 patched for QEMU)")

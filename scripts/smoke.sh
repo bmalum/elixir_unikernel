@@ -45,14 +45,49 @@ run_vm() {
   echo "$log.clean"
 }
 
+# Host-side clients against the guest's echo servers (QEMU hostfwd 4000/4001/4443).
+HOST_PORT_TCP=${HOST_PORT_TCP:-4000}; HOST_PORT_UDP=${HOST_PORT_UDP:-4001}; HOST_PORT_TLS=${HOST_PORT_TLS:-4443}
+client_checks() {
+  python3 - "$HOST_PORT_TCP" "$HOST_PORT_UDP" <<'PY' 2>&1
+import socket, sys
+tcp, udp = int(sys.argv[1]), int(sys.argv[2])
+try:
+    s = socket.create_connection(("127.0.0.1", tcp), 5); s.sendall(b"hello\n"); print("TCP", s.recv(100) == b"hello\n"); s.close()
+except Exception as e: print("TCP False", e)
+try:
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.settimeout(5); u.sendto(b"ping", ("127.0.0.1", udp)); print("UDP", u.recvfrom(100)[0] == b"ping")
+except Exception as e: print("UDP False", e)
+PY
+  out=$( (echo "tls-hello"; sleep 2) | $TIMEOUT_BIN 15 openssl s_client -connect 127.0.0.1:$HOST_PORT_TLS -tls1_3 -quiet 2>/dev/null | head -1)
+  [ "$out" = "tls-hello" ] && echo "TLS True" || echo "TLS False ($out)"
+}
+
 echo "== $LABEL: app mode"
-log=$(run_vm app 'PROBE done' '' 'PROBE done')
+# run_vm types <input> after <waitre>; we abuse the hook to run host clients instead.
+run_vm_app() {
+  local log="$LOGDIR/$LABEL-app.log" qpid t=0
+  : > "$log"
+  $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=app" < /dev/null > "$log" 2>&1 &
+  qpid=$!
+  while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
+    sleep 1; t=$((t+1))
+    if [ "$(grep -cE '^LISTEN (tcp|udp|tls) ' "$log")" -ge 3 ] && grep -q 'PROBE done' "$log"; then
+      sleep 2; client_checks > "$LOGDIR/$LABEL-clients.log"; break
+    fi
+  done
+  kill $qpid 2>/dev/null; wait $qpid 2>/dev/null
+  strip_ansi "$log"; echo "$log.clean"
+}
+log=$(run_vm_app)
 grep -q '\[init\] exec'        "$log" && ok "init exec'd beam.smp"   || bad "init did not exec beam.smp"
 grep -q 'uniapp starting'      "$log" && ok "application started"    || bad "application did not start"
-grep -q 'echo: listening'      "$log" && ok "gen_tcp listen"         || bad "gen_tcp listen"
-for p in udp tcp tls_srv; do
-  grep -q "PROBE $p ok" "$log" && ok "probe $p" || bad "probe $p: $(grep "PROBE $p" "$log" | head -1)"
+for k in tcp udp tls; do
+  grep -qE "^LISTEN $k " "$log" && ok "$k server listening" || bad "$k server not listening"
 done
+C="$LOGDIR/$LABEL-clients.log"
+grep -q '^TCP True' "$C" 2>/dev/null && ok "host -> guest gen_tcp echo"  || bad "gen_tcp echo from host: $(grep TCP "$C" 2>/dev/null)"
+grep -q '^UDP True' "$C" 2>/dev/null && ok "host -> guest gen_udp echo"  || bad "gen_udp echo from host: $(grep UDP "$C" 2>/dev/null)"
+grep -q '^TLS True' "$C" 2>/dev/null && ok "host -> guest ssl echo (TLS 1.3)" || bad "ssl echo from host: $(grep TLS "$C" 2>/dev/null)"
 if [[ "$CMDLINE" == *uniapp.tls_host=* ]]; then
   for p in dns tls; do
     grep -q "PROBE $p ok" "$log" && ok "probe $p" || bad "probe $p: $(grep "PROBE $p" "$log" | head -1)"
