@@ -1,0 +1,686 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 454741af..b1504d11 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -267,6 +267,7 @@ smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2026-08-11_1b
+     "proto-ipv6",
+     "socket-udp",
+     "socket-tcp",
++    "socket-dhcpv4",
+ ] }
+ takeable = "0.2.2"
+ time = { version = "0.3", default-features = false, features = ["alloc"] }
+diff --git a/kernel/core/src/fs/fs_impls/procfs/mod.rs b/kernel/core/src/fs/fs_impls/procfs/mod.rs
+index 0c2201ae..1070fd97 100644
+--- a/kernel/core/src/fs/fs_impls/procfs/mod.rs
++++ b/kernel/core/src/fs/fs_impls/procfs/mod.rs
+@@ -41,6 +41,7 @@ use crate::{
+ };
+ 
+ mod cmdline;
++mod net;
+ mod cpuinfo;
+ mod filesystems;
+ mod loadavg;
+@@ -161,6 +162,7 @@ impl RootDirOps {
+         ("loadavg", InodeType::File, LoadAvgFileOps::new_inode),
+         ("meminfo", InodeType::File, MemInfoFileOps::new_inode),
+         ("mounts", InodeType::SymLink, MountsSymOps::new_inode),
++        ("net", InodeType::Dir, net::NetDirOps::new_inode),
+         ("self", InodeType::SymLink, SelfSymOps::new_inode),
+         ("stat", InodeType::File, StatFileOps::new_inode),
+         ("sys", InodeType::Dir, SysDirOps::new_inode),
+diff --git a/kernel/core/src/fs/fs_impls/procfs/net.rs b/kernel/core/src/fs/fs_impls/procfs/net.rs
+new file mode 100644
+index 00000000..dab0448f
+--- /dev/null
++++ b/kernel/core/src/fs/fs_impls/procfs/net.rs
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: MPL-2.0
++
++//! `/proc/net`.
++
++#![short_vis_path::add(procfs)]
++
++use aster_util::printer::VmPrinter;
++
++use super::{
++    StaticEntry,
++    template::{ReaddirEntry, listed_entries_from_table, visit_listed_entries},
++};
++use crate::{
++    fs::{
++        file::{InodeType, mkmod},
++        procfs::template::{
++            ProcDir, ProcDirOps, ProcFile, ProcFileOps, lookup_child_from_table,
++        },
++        vfs::inode::Inode,
++    },
++    prelude::*,
++};
++
++pub(in procfs) struct NetDirOps;
++
++impl NetDirOps {
++    pub(in procfs) fn new_inode(parent: Weak<dyn Inode>) -> Arc<dyn Inode> {
++        ProcDir::new(Self, parent, mkmod!(a+rx))
++    }
++
++    const STATIC_ENTRIES: &'static [StaticEntry] = &[
++        ("dhcp", InodeType::File, DhcpFileOps::new_inode),
++    ];
++}
++
++impl ProcDirOps for NetDirOps {
++    fn lookup_child(&self, this_dir: &ProcDir<Self>, name: &str) -> Result<Arc<dyn Inode>> {
++        if let Some(child) = lookup_child_from_table(name, Self::STATIC_ENTRIES, |f| {
++            (f)(this_dir.this_weak().clone())
++        }) {
++            return Ok(child);
++        }
++        return_errno_with_message!(Errno::ENOENT, "the file does not exist");
++    }
++
++    fn visit_entries_from_offset<'a, F>(&'a self, offset: usize, visit_fn: F) -> Result<()>
++    where
++        F: FnMut(ReaddirEntry<'a>) -> Result<()>,
++    {
++        visit_listed_entries(
++            offset,
++            listed_entries_from_table(Self::STATIC_ENTRIES),
++            visit_fn,
++        )
++    }
++}
++
++/// `/proc/net/dhcp`: the DHCP leases held by the kernel's DHCP client.
++///
++/// This file is not part of Linux: Linux has no in-kernel DHCP client. One line
++/// per DHCP-configured interface, `eth0 10.0.2.15/24 10.0.2.2 dns 10.0.2.3`, or
++/// `eth0 pending` while the lease is outstanding.
++struct DhcpFileOps;
++
++impl DhcpFileOps {
++    fn new_inode(parent: Weak<dyn Inode>) -> Arc<dyn Inode> {
++        ProcFile::new(Self, parent, mkmod!(a+r))
++    }
++}
++
++impl ProcFileOps for DhcpFileOps {
++    fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
++        let mut printer = VmPrinter::new_skip(writer, offset);
++        write!(printer, "{}", crate::net::dhcp_status())?;
++        Ok(printer.bytes_written())
++    }
++}
+diff --git a/kernel/core/src/net/iface/init.rs b/kernel/core/src/net/iface/init.rs
+index 5e8ac771..e88d2b34 100644
+--- a/kernel/core/src/net/iface/init.rs
++++ b/kernel/core/src/net/iface/init.rs
+@@ -14,6 +14,11 @@ use crate::{net::iface::sched::PollScheduler, prelude::*};
+ 
+ static IFACES: Once<Vec<Arc<Iface>>> = Once::new();
+ 
++/// `ip=dhcp` on the kernel command line (the Linux `ip=` parameter): configure
++/// the NIC with DHCP instead of the built-in `10.0.2.15/24` for QEMU.
++static IP_PARAM: Once<String> = Once::new();
++aster_cmdline::define_kv_param!("ip", IP_PARAM);
++
+ fn virtio_iface() -> Option<&'static Arc<Iface>> {
+     IFACES.get().unwrap().get(1)
+ }
+@@ -132,6 +137,17 @@ fn new_virtio() -> Option<Arc<Iface>> {
+         | InterfaceFlags::MULTICAST
+         | InterfaceFlags::LOWER_UP;
+ 
++    if IP_PARAM.get().is_some_and(|v| v == "dhcp") {
++        info!("eth0: configuring with DHCP (ip=dhcp)");
++        return Some(EtherIface::new_dhcp(
++            Wrapper(virtio_net),
++            ether_addr,
++            InterfaceName::from_str_truncated("eth0"),
++            PollScheduler::new(),
++            flags,
++        ) as Arc<Iface>);
++    }
++
+     Some(EtherIface::new(
+         Wrapper(virtio_net),
+         ether_addr,
+diff --git a/kernel/core/src/net/mod.rs b/kernel/core/src/net/mod.rs
+index ba135877..99dbf739 100644
+--- a/kernel/core/src/net/mod.rs
++++ b/kernel/core/src/net/mod.rs
+@@ -1,10 +1,50 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
++use crate::prelude::*;
++
+ mod iface;
+ pub(crate) mod route;
+ pub(crate) mod socket;
+ pub(crate) mod uts_ns;
+ 
++/// One line per interface configured by DHCP: `<name> <addr>/<prefix> <gw|-> dns <ip>...`,
++/// or `<name> pending` while no lease has been obtained. Backs `/proc/net/dhcp`.
++pub(crate) fn dhcp_status() -> String {
++    use core::fmt::Write;
++
++    let mut out = String::new();
++    for iface in iface::iter_all_ifaces() {
++        let name = iface.name().as_str().unwrap_or("?");
++        let dns = iface.dns_servers();
++        if iface.is_dhcp_pending() {
++            let _ = writeln!(out, "{} pending", name);
++            continue;
++        }
++        if dns.is_empty() {
++            continue;
++        }
++        let Some(cidr) = iface.ipv4_cidr() else { continue };
++        let gw = iface
++            .routes()
++            .into_iter()
++            .find(|r| matches!(r.cidr, aster_bigtcp::wire::IpCidr::Ipv4(c) if c.prefix_len() == 0))
++            .map(|r| r.via_router);
++        let _ = write!(out, "{} {} ", name, cidr);
++        match gw {
++            Some(gw) => {
++                let _ = write!(out, "{}", gw);
++            }
++            None => out.push('-'),
++        }
++        out.push_str(" dns");
++        for d in dns {
++            let _ = write!(out, " {}", d);
++        }
++        out.push('\n');
++    }
++    out
++}
++
+ pub(crate) fn init() {
+     iface::init();
+     route::init();
+diff --git a/kernel/core/src/net/route/mod.rs b/kernel/core/src/net/route/mod.rs
+index 6d918c12..50948f0d 100644
+--- a/kernel/core/src/net/route/mod.rs
++++ b/kernel/core/src/net/route/mod.rs
+@@ -10,6 +10,8 @@ use aster_bigtcp::{
+     iface::InterfaceType,
+     wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+ };
++use core::sync::atomic::{AtomicU64, Ordering};
++
+ use spin::Once;
+ 
+ use self::{manager::RouteManager, rule::Rule};
+@@ -59,12 +61,27 @@ fn build_ipv6_manager() -> RouteManager<Ipv6Address> {
+     )
+ }
+ 
++/// The `CONFIG_GENERATION` the tables were last built from.
++static BUILT_GENERATION: AtomicU64 = AtomicU64::new(0);
++
+ /// Rebuilds the routing tables from the interfaces' current configuration.
+ ///
+ /// Call after changing an interface's address, netmask or gateway.
+ pub(crate) fn reload() {
++    let generation = aster_bigtcp::iface::CONFIG_GENERATION.load(Ordering::Acquire);
+     *IPV4_ROUTE_MANAGER.get().unwrap().write() = build_ipv4_manager();
+     *IPV6_ROUTE_MANAGER.get().unwrap().write() = build_ipv6_manager();
++    BUILT_GENERATION.store(generation, Ordering::Release);
++}
++
++/// Rebuilds the tables if an interface changed since they were built (e.g. a
++/// DHCP lease arrived in the poll path, which cannot take the write lock).
++fn reload_if_stale() {
++    if BUILT_GENERATION.load(Ordering::Acquire)
++        != aster_bigtcp::iface::CONFIG_GENERATION.load(Ordering::Acquire)
++    {
++        reload();
++    }
+ }
+ 
+ /// A route lookup key for one address family.
+@@ -203,6 +220,7 @@ fn iface_ipv6_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv6Address>> {
+ 
+ /// Looks up the output interface for an IP destination.
+ pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
++    reload_if_stale();
+     let iface = match dst {
+         IpAddress::Ipv4(dst) => IPV4_ROUTE_MANAGER
+             .get()
+@@ -224,6 +242,7 @@ pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
+ 
+ /// Looks up the interface that owns a local IP address.
+ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
++    reload_if_stale();
+     let (type_, iface) = match address {
+         IpAddress::Ipv4(address) => {
+             let entry = IPV4_ROUTE_MANAGER
+diff --git a/kernel/libs/aster-bigtcp/Cargo.toml b/kernel/libs/aster-bigtcp/Cargo.toml
+index b522626e..4a87ecf5 100644
+--- a/kernel/libs/aster-bigtcp/Cargo.toml
++++ b/kernel/libs/aster-bigtcp/Cargo.toml
+@@ -14,6 +14,7 @@ int-to-c-enum.workspace = true
+ jhash.workspace = true
+ ostd.workspace = true
+ ostd-pod.workspace = true
++log.workspace = true
+ smoltcp.workspace = true
+ spin.workspace = true
+ takeable.workspace = true
+diff --git a/kernel/libs/aster-bigtcp/src/iface/common.rs b/kernel/libs/aster-bigtcp/src/iface/common.rs
+index c5882f1d..41e0cba8 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/common.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/common.rs
+@@ -109,6 +109,32 @@ impl<E: Ext> IfaceCommon<E> {
+         flags: InterfaceFlags,
+         interface: smoltcp::iface::Interface,
+         sched_poll: E::ScheduleNextPoll,
++    ) -> Self {
++        Self::with_pollable(name, type_, flags, PollableIface::new(interface), sched_poll)
++    }
++
++    pub(super) fn new_with_dhcp(
++        name: InterfaceName,
++        type_: InterfaceType,
++        flags: InterfaceFlags,
++        interface: smoltcp::iface::Interface,
++        sched_poll: E::ScheduleNextPoll,
++    ) -> Self {
++        Self::with_pollable(
++            name,
++            type_,
++            flags,
++            PollableIface::new_with_dhcp(interface),
++            sched_poll,
++        )
++    }
++
++    fn with_pollable(
++        name: InterfaceName,
++        type_: InterfaceType,
++        flags: InterfaceFlags,
++        interface: PollableIface<E>,
++        sched_poll: E::ScheduleNextPoll,
+     ) -> Self {
+         let index = INTERFACE_INDEX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
+ 
+@@ -117,7 +143,7 @@ impl<E: Ext> IfaceCommon<E> {
+             name,
+             type_,
+             flags,
+-            interface: SpinLock::new(PollableIface::new(interface)),
++            interface: SpinLock::new(interface),
+             used_ports: SpinLock::new(PortTable::new()),
+             sockets: SpinLock::new(SocketTable::new()),
+             sched_poll,
+@@ -145,11 +171,24 @@ impl<E: Ext> IfaceCommon<E> {
+     }
+ 
+     pub(super) fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
+-        self.interface.lock().set_ipv4_cidr(cidr);
++        let mut interface = self.interface.lock();
++        // User space takes over: a running DHCP client would fight with it.
++        interface.stop_dhcp();
++        interface.set_ipv4_cidr(cidr);
++        super::poll_iface::CONFIG_GENERATION.fetch_add(1, Ordering::Release);
+     }
+ 
+     pub(super) fn set_ipv4_gateway(&self, gateway: Option<Ipv4Address>) {
+         self.interface.lock().set_ipv4_gateway(gateway);
++        super::poll_iface::CONFIG_GENERATION.fetch_add(1, Ordering::Release);
++    }
++
++    pub(super) fn dns_servers(&self) -> Vec<Ipv4Address> {
++        self.interface.lock().dns_servers().to_vec()
++    }
++
++    pub(super) fn is_dhcp_pending(&self) -> bool {
++        self.interface.lock().is_dhcp_pending()
+     }
+ 
+     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
+@@ -271,6 +310,13 @@ impl<E: Ext> IfaceCommon<E> {
+         context.poll_ingress(device, phy);
+         context.poll_egress(device, phy);
+ 
++        // A lease may have arrived: apply it, then let the client answer (e.g.
++        // send REQUEST after OFFER) before the next poll is scheduled.
++        if interface.poll_dhcp() {
++            let mut context = PollContext::new(interface.as_mut(), &sockets, &mut socket_actions);
++            context.poll_egress(device, phy);
++        }
++
+         // Insert new connections and remove dead connections.
+         for action in socket_actions.into_iter() {
+             match action {
+diff --git a/kernel/libs/aster-bigtcp/src/iface/iface.rs b/kernel/libs/aster-bigtcp/src/iface/iface.rs
+index 1f1d93b0..a53deea3 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/iface.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/iface.rs
+@@ -111,6 +111,16 @@ impl<E: Ext> dyn Iface<E> {
+         self.common().set_ipv4_gateway(gateway);
+     }
+ 
++    /// DNS servers from the DHCP lease, if the iface is configured by DHCP.
++    pub fn dns_servers(&self) -> Vec<Ipv4Address> {
++        self.common().dns_servers()
++    }
++
++    /// Whether the iface is configured by DHCP and still waiting for a lease.
++    pub fn is_dhcp_pending(&self) -> bool {
++        self.common().is_dhcp_pending()
++    }
++
+     /// Returns routes currently installed in the interface.
+     pub fn routes(&self) -> Vec<Route> {
+         self.common().routes()
+diff --git a/kernel/libs/aster-bigtcp/src/iface/mod.rs b/kernel/libs/aster-bigtcp/src/iface/mod.rs
+index 9dafea91..7d61e122 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/mod.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/mod.rs
+@@ -19,6 +19,7 @@ pub use common::{BoundPort, BoundTcpPort, BoundUdpPort, InterfaceFlags, Interfac
+ pub use iface::Iface;
+ pub(crate) use packet_slice::PacketSlice;
+ pub use phy::{EtherIface, IpIface};
++pub use poll_iface::CONFIG_GENERATION;
+ pub(crate) use poll_iface::{PollKey, PollableIfaceMut};
+ pub use port::BindPortConfig;
+ pub use sched::ScheduleNextPoll;
+diff --git a/kernel/libs/aster-bigtcp/src/iface/phy/ether.rs b/kernel/libs/aster-bigtcp/src/iface/phy/ether.rs
+index 4aefbc2c..e2f341f5 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/phy/ether.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/phy/ether.rs
+@@ -67,6 +67,31 @@ impl<D: WithDevice, E: Ext> EtherIface<D, E> {
+             arp_table: SpinLock::new(BTreeMap::new()),
+         })
+     }
++
++    /// Creates an Ethernet iface without an IPv4 address that obtains one via DHCP.
++    pub fn new_dhcp(
++        driver: D,
++        ether_addr: EthernetAddress,
++        name: InterfaceName,
++        sched_poll: E::ScheduleNextPoll,
++        flags: InterfaceFlags,
++    ) -> Arc<Self> {
++        let interface = driver.with(|device| {
++            let config = Config::new(wire::HardwareAddress::Ethernet(ether_addr));
++            let now = get_network_timestamp();
++            new_interface(config, device.capabilities(), now)
++        });
++
++        let common =
++            IfaceCommon::new_with_dhcp(name, InterfaceType::ETHER, flags, interface, sched_poll);
++
++        Arc::new(Self {
++            driver,
++            common,
++            ether_addr,
++            arp_table: SpinLock::new(BTreeMap::new()),
++        })
++    }
+ }
+ 
+ impl<D, E: Ext> IfaceInternal<E> for EtherIface<D, E> {
+diff --git a/kernel/libs/aster-bigtcp/src/iface/poll.rs b/kernel/libs/aster-bigtcp/src/iface/poll.rs
+index 95e0aac2..9e4d6cd3 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/poll.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/poll.rs
+@@ -108,7 +108,12 @@ impl<E: Ext> PollContext<'_, E> {
+         let can_process = {
+             let cx = self.iface.context();
+             let dst_addr = ip_repr.inner.dst_addr();
+-            cx.is_broadcast(&dst_addr) || cx.is_unicast_local(dst_addr)
++            cx.is_broadcast(&dst_addr)
++                || cx.is_unicast_local(dst_addr)
++                // Without an address yet, a DHCP OFFER/ACK may be unicast to the
++                // address we are about to be given. Let UDP processing sort it out.
++                || (self.iface.is_dhcp_pending()
++                    && ip_repr.inner.next_header() == IpProtocol::Udp)
+         };
+         if !can_process {
+             return self.generate_icmp_unreachable(
+@@ -297,6 +302,17 @@ impl<E: Ext> PollContext<'_, E> {
+         udp_repr: &UdpRepr,
+         udp_payload: PacketSlice<'_>,
+     ) -> bool {
++        if let IpRepr::Ipv4(ipv4_repr) = ip_repr
++            && udp_repr.src_port == 67
++            && udp_repr.dst_port == 68
++        {
++            let mut buf = alloc::vec![0u8; udp_payload.len()];
++            udp_payload.copy_to_slice(&mut buf);
++            if self.iface.process_dhcp(ipv4_repr, udp_repr, &buf) {
++                return true;
++            }
++        }
++
+         let mut processed = false;
+         let is_unicast = self.iface.context().is_unicast(ip_repr.dst_addr());
+ 
+@@ -466,6 +482,12 @@ impl<E: Ext> PollContext<'_, E> {
+     }
+ 
+     fn dispatch_ip(&mut self, phy: &dyn PollPhy) -> (bool, Option<TxPacketWithDst>) {
++        if let Some((ipv4_repr, udp_repr, payload)) = self.iface.dispatch_dhcp() {
++            let ip_repr = IpRepr::Ipv4(ipv4_repr);
++            let tx_packet = self.emit_udp(phy, &ip_repr, &udp_repr, &payload);
++            return (true, tx_packet);
++        }
++
+         let (did_something_tcp, tx_packet) = self.dispatch_tcp(phy);
+ 
+         if tx_packet.is_some() {
+diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
+index 1b883d60..c8848de3 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
+@@ -6,7 +6,14 @@ use core::{
+     sync::atomic::{AtomicU64, Ordering},
+ };
+ 
+-use smoltcp::iface::Route;
++use smoltcp::{
++    iface::Route,
++    socket::{
++        PollAt,
++        dhcpv4::{Event as DhcpEvent, Socket as Dhcpv4Socket},
++    },
++    wire::{Ipv4Address, Ipv4Repr, UdpRepr},
++};
+ 
+ use crate::{
+     ext::Ext,
+@@ -20,20 +27,96 @@ use crate::{
+ pub(crate) struct PollableIface<E: Ext> {
+     interface: smoltcp::iface::Interface,
+     pending_conns: PendingConnSet<E>,
++    /// The DHCPv4 client, present when the interface is configured by DHCP.
++    dhcp: Option<Dhcpv4Socket<'static>>,
++    /// DNS servers announced by the last DHCP lease.
++    dns_servers: Vec<Ipv4Address>,
+ }
+ 
++/// Bumped every time an interface's address or routes change at runtime.
++///
++/// Consumers that cache routing information (the kernel's route tables) compare
++/// this with the value they last saw and rebuild when it differs.
++pub static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(1);
++
+ impl<E: Ext> PollableIface<E> {
+     pub(super) fn new(interface: smoltcp::iface::Interface) -> Self {
+         Self {
+             interface,
+             pending_conns: PendingConnSet::new(),
++            dhcp: None,
++            dns_servers: Vec::new(),
+         }
+     }
+ 
++    pub(super) fn new_with_dhcp(interface: smoltcp::iface::Interface) -> Self {
++        let mut this = Self::new(interface);
++        this.dhcp = Some(Dhcpv4Socket::new());
++        this
++    }
++
++    /// Returns the DNS servers announced by DHCP (empty for static configuration).
++    pub(super) fn dns_servers(&self) -> &[Ipv4Address] {
++        &self.dns_servers
++    }
++
++    /// Whether DHCP is active and no lease has been obtained yet.
++    pub(super) fn is_dhcp_pending(&self) -> bool {
++        self.dhcp.is_some() && self.ipv4_cidr().is_none()
++    }
++
++    /// Stops the DHCP client. Called when user space configures the address itself.
++    pub(super) fn stop_dhcp(&mut self) {
++        self.dhcp = None;
++        self.dns_servers.clear();
++    }
++
++    /// Applies lease events reported by the DHCP client. Returns whether the
++    /// configuration changed.
++    pub(super) fn poll_dhcp(&mut self) -> bool {
++        let Some(dhcp) = self.dhcp.as_mut() else {
++            return false;
++        };
++        let Some(event) = dhcp.poll() else {
++            return false;
++        };
++        match event {
++            DhcpEvent::Configured(config) => {
++                let address = config.address;
++                let router = config.router;
++                let dns: Vec<Ipv4Address> = config.dns_servers.iter().copied().collect();
++                log::info!(
++                    "dhcp: lease {} gateway {:?} dns {:?}",
++                    address,
++                    router,
++                    dns
++                );
++                self.set_ipv4_cidr(address);
++                self.set_ipv4_gateway(router);
++                self.dns_servers = dns;
++            }
++            DhcpEvent::Deconfigured => {
++                if self.ipv4_cidr().is_none() {
++                    // smoltcp reports `Deconfigured` once at start-up; nothing to undo.
++                    return false;
++                }
++                log::info!("dhcp: lease lost");
++                self.interface.update_ip_addrs(|addrs| {
++                    addrs.retain(|a| !matches!(a, smoltcp::wire::IpCidr::Ipv4(_)));
++                });
++                self.set_ipv4_gateway(None);
++                self.dns_servers.clear();
++            }
++        }
++        CONFIG_GENERATION.fetch_add(1, Ordering::Release);
++        true
++    }
++
+     pub(super) fn as_mut(&mut self) -> PollableIfaceMut<'_, E> {
+         PollableIfaceMut {
+             context: self.interface.context(),
+             pending_conns: &mut self.pending_conns,
++            dhcp: self.dhcp.as_mut(),
+         }
+     }
+ 
+@@ -66,7 +149,7 @@ impl<E: Ext> PollableIface<E> {
+     }
+ 
+     /// Replaces the default IPv4 route.
+-    pub(super) fn set_ipv4_gateway(&mut self, gateway: Option<smoltcp::wire::Ipv4Address>) {
++    pub(super) fn set_ipv4_gateway(&mut self, gateway: Option<Ipv4Address>) {
+         let routes = self.interface.routes_mut();
+         match gateway {
+             Some(gw) => {
+@@ -87,8 +170,20 @@ impl<E: Ext> PollableIface<E> {
+     }
+ 
+     /// Returns the next poll time.
+-    pub(super) fn next_poll_at_ms(&self) -> Option<u64> {
+-        self.pending_conns.next_poll_at_ms()
++    pub(super) fn next_poll_at_ms(&mut self) -> Option<u64> {
++        let conns = self.pending_conns.next_poll_at_ms();
++        let Some(dhcp) = self.dhcp.as_ref() else {
++            return conns;
++        };
++        let dhcp_at = match dhcp.poll_at(self.interface.context()) {
++            PollAt::Now => Some(0),
++            PollAt::Time(t) => Some(t.total_millis() as u64),
++            PollAt::Ingress => None,
++        };
++        match (conns, dhcp_at) {
++            (Some(a), Some(b)) => Some(a.min(b)),
++            (a, b) => a.or(b),
++        }
+     }
+ }
+ 
+@@ -143,6 +238,7 @@ impl<E: Ext> PollableIface<E> {
+ pub(crate) struct PollableIfaceMut<'a, E: Ext> {
+     context: &'a mut smoltcp::iface::Context,
+     pending_conns: &'a mut PendingConnSet<E>,
++    dhcp: Option<&'a mut Dhcpv4Socket<'static>>,
+ }
+ 
+ // FIXME: We provide `new()` and `inner_mut()` as `pub(crate)` methods because it's necessary to
+@@ -156,12 +252,51 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
+         Self {
+             context,
+             pending_conns,
++            dhcp: None,
+         }
+     }
+ 
+     pub(crate) fn inner_mut(&mut self) -> (&mut smoltcp::iface::Context, &mut PendingConnSet<E>) {
+         (self.context, self.pending_conns)
+     }
++
++    /// Whether a DHCP client is attached and still waiting for a lease.
++    pub(super) fn is_dhcp_pending(&self) -> bool {
++        self.dhcp.is_some() && self.context.ipv4_addr().is_none()
++    }
++
++    /// Feeds an incoming UDP datagram to the DHCP client. Returns `true` if it
++    /// was a DHCP packet (whether or not the client accepted it).
++    pub(super) fn process_dhcp(
++        &mut self,
++        ip_repr: &Ipv4Repr,
++        udp_repr: &UdpRepr,
++        payload: &[u8],
++    ) -> bool {
++        let Some(dhcp) = self.dhcp.as_deref_mut() else {
++            return false;
++        };
++        if udp_repr.src_port != 67 || udp_repr.dst_port != 68 {
++            return false;
++        }
++        dhcp.process(self.context, ip_repr, udp_repr, payload);
++        true
++    }
++
++    /// Lets the DHCP client emit a packet if one is due. The packet is
++    /// returned as (IP header, UDP header, DHCP payload bytes).
++    pub(super) fn dispatch_dhcp(&mut self) -> Option<(Ipv4Repr, UdpRepr, Vec<u8>)> {
++        let dhcp = self.dhcp.as_deref_mut()?;
++        let mut out = None;
++        let _ = dhcp.dispatch(self.context, |_cx, (ip_repr, udp_repr, dhcp_repr)| {
++            let mut buf = alloc::vec![0u8; dhcp_repr.buffer_len()];
++            let mut packet = smoltcp::wire::DhcpPacket::new_unchecked(&mut buf[..]);
++            dhcp_repr.emit(&mut packet).map_err(|_| ())?;
++            out = Some((ip_repr, udp_repr, buf));
++            Ok::<(), ()>(())
++        });
++        out
++    }
+ }
+ 
+ impl<E: Ext> PollableIfaceMut<'_, E> {

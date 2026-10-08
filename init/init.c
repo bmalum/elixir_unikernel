@@ -281,6 +281,38 @@ static int dhcp_client(int ctl, const char *eth, struct dhcp_lease *lease) {
 
 static in_addr_t g_dns;   /* nameserver chosen by setup_net, used by setup_inetrc */
 
+/* Asterinas with `ip=dhcp`: the kernel runs the DHCP client and reports the
+ * lease in /proc/net/dhcp as "eth0 10.0.2.15/24 10.0.2.2 dns 10.0.2.3" (or
+ * "eth0 pending"). Wait for it; returns 0 and fills the lease when granted,
+ * -1 when the file is absent (plain Linux) or no lease arrives in time. */
+static int kernel_dhcp(const char *eth, struct dhcp_lease *l, int *prefix) {
+    if (access("/proc/net/dhcp", R_OK) < 0) return -1;
+    for (int i = 0; i < 300; i++) {           /* 30 s */
+        char buf[512] = {0};
+        int fd = open("/proc/net/dhcp", O_RDONLY);
+        if (fd < 0) return -1;
+        ssize_t n = read(fd, buf, sizeof buf - 1); close(fd);
+        if (n <= 0) return -1;                  /* not a DHCP-configured kernel */
+        char name[IFNAMSIZ], cidr[64], gw[32], dnsw[8], dns1[32] = "";
+        int k = sscanf(buf, "%15s %63s %31s %7s %31s", name, cidr, gw, dnsw, dns1);
+        if (k >= 3 && strcmp(name, eth) == 0 && strcmp(cidr, "pending") != 0) {
+            char *slash = strchr(cidr, '/');
+            if (slash) { *slash = 0; *prefix = atoi(slash + 1); }
+            struct in_addr a;
+            if (inet_pton(AF_INET, cidr, &a) != 1) return -1;
+            l->ip = a.s_addr;
+            l->mask = *prefix == 0 ? 0 : htonl(~0u << (32 - *prefix));
+            l->gw = inet_pton(AF_INET, gw, &a) == 1 ? a.s_addr : 0;
+            l->dns = (k >= 5 && inet_pton(AF_INET, dns1, &a) == 1) ? a.s_addr : 0;
+            return 0;
+        }
+        if (i == 0) logmsg("dhcp: waiting for the kernel's lease on %s", eth);
+        usleep(100 * 1000);
+    }
+    logmsg("dhcp: kernel reported no lease within 30 s");
+    return -1;
+}
+
 static void setup_net(void) {
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) { logmsg("socket: %s", strerror(errno)); return; }
@@ -302,8 +334,11 @@ static void setup_net(void) {
     struct in_addr a, g; in_addr_t mask; int prefix = 24;
     char ipbuf[64]; const char *how;
 
-    struct dhcp_lease lease;
-    if (!ip && dhcp_client(s, eth, &lease) == 0) {
+    struct dhcp_lease lease; int kernel_configured = 0;
+    if (!ip && kernel_dhcp(eth, &lease, &prefix) == 0) {
+        how = "kernel dhcp"; kernel_configured = 1;
+        a.s_addr = lease.ip; mask = lease.mask; g.s_addr = lease.gw; g_dns = lease.dns;
+    } else if (!ip && dhcp_client(s, eth, &lease) == 0) {
         how = "dhcp";
         a.s_addr = lease.ip; mask = lease.mask ? lease.mask : htonl(0xffffff00);
         g.s_addr = lease.gw; g_dns = lease.dns;
@@ -325,11 +360,13 @@ static void setup_net(void) {
     if (!g_dns) inet_pton(AF_INET, "10.0.2.3", (struct in_addr *)&g_dns);
     inet_ntop(AF_INET, &a, ipbuf, sizeof ipbuf);
 
+    if (!kernel_configured) {
     if (if_set_addr(s, eth, SIOCSIFADDR, a.s_addr) < 0) logmsg("%s addr: %s", eth, strerror(errno));
     if (if_set_addr(s, eth, SIOCSIFNETMASK, mask) < 0) logmsg("%s netmask: %s", eth, strerror(errno));
     if (if_set_flags(s, eth, IFF_UP | IFF_RUNNING) < 0) logmsg("%s up: %s", eth, strerror(errno));
+    }
 
-    if (g.s_addr) {
+    if (g.s_addr && !kernel_configured) {
         struct rtentry rt;
         memset(&rt, 0, sizeof rt);
         struct sockaddr_in *dst = (struct sockaddr_in *)&rt.rt_dst;

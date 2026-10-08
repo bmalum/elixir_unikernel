@@ -86,10 +86,41 @@ QEMU user network `10.0.9.0/24`: the guest answers on the new address and
 the DNS and TLS probes pass, which they cannot with the compiled-in
 `10.0.2.15`. Limits: one IPv4 address per interface, default route only.
 
+## 0004: in-kernel DHCPv4 client (`ip=dhcp`)
+
+Asterinas has no `AF_PACKET` sockets, so the DHCP client in `/init` cannot
+run there, and on EC2 the address is only available via DHCP. smoltcp, the
+network stack inside `aster-bigtcp`, ships a DHCPv4 client socket; this patch
+wires it in:
+
+- `Cargo.toml`: enables smoltcp's `socket-dhcpv4` feature.
+- `aster-bigtcp`: `EtherIface::new_dhcp` creates an interface without an
+  IPv4 address and a `Dhcpv4Socket` next to it. Ingress UDP from port 67 to
+  68 is fed to the client, the client's DISCOVER/REQUEST packets are emitted
+  through the normal UDP path (so broadcast and the unspecified source work),
+  and the client's retry timers take part in `next_poll_at_ms`. While no
+  address is set, unicast UDP to a not-yet-owned address is accepted,
+  because servers may unicast the OFFER to `yiaddr`. On `Configured` the
+  lease is applied with the setters from patch 0003, and
+  `CONFIG_GENERATION` is bumped.
+- `kernel/core/src/net/route`: the route tables rebuild lazily on the next
+  lookup when `CONFIG_GENERATION` changed, since the lease arrives in the
+  poll path, where the route lock cannot be taken.
+- `kernel/core/src/net/iface/init.rs`: `ip=dhcp` on the command line selects
+  `new_dhcp` for the virtio NIC; otherwise behaviour is unchanged.
+- `/proc/net/dhcp`: one line per DHCP-configured interface,
+  `eth0 10.0.2.15/24 10.0.2.2 dns 10.0.2.3`, or `eth0 pending`. Linux has no
+  such file (it has no in-kernel DHCP client); it is how `/init` learns the
+  nameserver.
+
+Measured under QEMU: the lease arrives 33 ms after boot, `/init` logs
+`net: eth0 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3 (kernel dhcp)`, and `make
+smoke-m1` passes without any `uniapp.ip=` parameter.
+
 ## Reporting upstream
 
-The patches are `git diff` output against `3d85cb4` and apply with
-`git apply`. To send them: open issues on
+The patches are `git diff` output against `3d85cb4`, apply in order with
+`git apply`, and each depends on the previous ones. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
 reproducer for 0002 and the `gen_tcp:listen` reproducer for 0001; the
 project's `CONTRIBUTING` asks for a regression test under

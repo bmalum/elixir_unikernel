@@ -4,6 +4,25 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+Work towards running on EC2 (docs/GOALS-EC2.md).
+
+### Added
+- `scripts/mkdisk.sh` and `make ami`: a GPT disk image with an EFI system
+  partition (GRUB, kernel, initramfs) that boots via OVMF from an NVMe
+  drive; `make smoke-disk` runs the assertions on it. `KERNEL=linux` builds
+  the same image around a Linux kernel.
+- `scripts/build-linux-ec2.sh`: Linux 6.1 with ENA, NVMe and EFI stub for
+  the Linux-kernel AMI.
+- DHCPv4 client in `/init` (Linux, `AF_PACKET`), used whenever `uniapp.ip=`
+  is absent; falls back to the QEMU defaults.
+- Asterinas patch 0003: `SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS`,
+  `SIOCADDRT`/`SIOCDELRT` so the address can be set at runtime.
+- Asterinas patch 0004: in-kernel DHCPv4 client (`ip=dhcp`) with the lease
+  published in `/proc/net/dhcp`.
+
+### Changed
+- `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.
+
 ## [0.1.0] - 2026-10-07
 
 First working release: milestones M0 (stock Linux), M1 (Asterinas) and M2

@@ -27,10 +27,9 @@ ROOTFS       := $(BUILD)/rootfs
 INITRAMFS    := $(BUILD)/initramfs.cpio.gz
 KERNEL_M1    := $(BUILD)/asterinas/aster-nix-osdk-bin
 TLS_HOST     ?= www.erlang.org
-# Static guest address for QEMU's user-mode network. Linux boots use DHCP
-# (STATIC_NET empty); Asterinas still needs the static values until its DHCP
-# client lands, see docs/book/src/internals/asterinas-patches.md.
-STATIC_NET   := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3
+# Both kernels obtain the address via DHCP from QEMU's user-mode network:
+# Linux through the client in /init, Asterinas through the in-kernel client
+# enabled by `ip=dhcp` (patch 0004). Pass uniapp.ip=/gw=/dns= for static setup.
 NET_ARGS     := uniapp.tls_host=$(TLS_HOST)
 
 # Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
@@ -119,7 +118,7 @@ asterinas: $(KERNEL_M1)
 $(KERNEL_M1): scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
 	scripts/build-asterinas.sh $(ASTERINAS_REF) $(abspath $(INITRAMFS)) $(abspath $(BUILD))
 
-M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(STATIC_NET) $(NET_ARGS)
+M1_CMDLINE = console=ttyS0 earlycon loglevel=error ip=dhcp $(NET_ARGS)
 QEMU_M1 = $(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(KERNEL_M1) -initrd $(INITRAMFS)
 
 ## run-m1:      boot on Asterinas into IEx (exit QEMU: Ctrl-a x)
@@ -139,7 +138,7 @@ smoke-m1: asterinas
 KERNEL      ?= asterinas
 DISK        := $(BUILD)/disk-$(KERNEL).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error $(STATIC_NET)
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error ip=dhcp
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2

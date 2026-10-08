@@ -43,7 +43,8 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
 - Hot code upgrades: no writable release directory (and `-mode interactive`
   loads from the read-only tree anyway).
 - Terminfo: `TERM=dumb`, no colours in IEx.
-- IPv6: untested. DHCP: not implemented; addresses come from the command line.
+- IPv6: untested. DHCP: IPv4 only, one lease per boot (renewals are handled
+  by the kernel client on Asterinas; `/init` on Linux does not renew).
 - Clean power-off from the guest: stopping the node leaves the kernel without
   an init process; QEMU keeps running.
 - Asterinas only: interface configuration from the command line (the address

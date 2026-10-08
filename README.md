@@ -8,7 +8,7 @@ TCP, UDP, TLS 1.3 and DNS work on the first boot.
 ```text
 [kernel] running /init as the init process
 [init] elixir_unikernel init, uptime 0.560 s
-[init] net: eth0 10.0.2.15/24 gw 10.0.2.2
+[init] net: eth0 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3 (kernel dhcp)
 [init] exec /rel/erts-17.1/bin/beam.smp (iex mode)
 Erlang/OTP 29 [erts-17.1] [source] [64-bit] [smp:2:2] [ds:2:2:10] [async-threads:1] [jit:ns]
 Interactive Elixir (1.20.4) - press Ctrl+C to exit (type h() ENTER for help)
@@ -38,8 +38,8 @@ While a VM runs, the guest's echo servers are reachable from the host:
 | Path | |
 |---|---|
 | `builder/Dockerfile` | static x86-64 OTP 29.1.1 + Elixir 1.20.4 + release; native build, ERTS cross-compiled with clang |
-| `builder/asterinas-patches/` | two small kernel patches (wildcard `bind()`, `timerfd` readiness), with reproducers |
-| `init/init.c` | PID 1: mount, NIC config from the kernel command line, inetrc, `exec beam.smp` |
+| `builder/asterinas-patches/` | four kernel patches: wildcard `bind()`, `timerfd` readiness, runtime `ifconfig` ioctls, in-kernel DHCP (`ip=dhcp`) |
+| `init/init.c` | PID 1: mount, DHCP or static NIC config, inetrc, `exec beam.smp` |
 | `app/` | sample release: TCP/UDP/TLS echo servers, DNS and TLS client probes |
 | `scripts/` | rootfs assembly, initramfs, kernel fetch/build, smoke test, dist bundle |
 | `docs/book/` | the manual (mdBook); `docs/RESEARCH.md` has the original research notes |
