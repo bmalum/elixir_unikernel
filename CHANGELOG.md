@@ -19,6 +19,13 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   `SIOCADDRT`/`SIOCDELRT` so the address can be set at runtime.
 - Asterinas patch 0004: in-kernel DHCPv4 client (`ip=dhcp`) with the lease
   published in `/proc/net/dhcp`.
+- Asterinas patch 0005: `aster-ena`, a driver for the EC2 Elastic Network
+  Adapter (one queue pair, MSI-X plus timer-tick polling, polled admin
+  queue). The Asterinas image boots on a t3.small, gets its address from
+  the VPC's DHCP, and passes the TCP, TLS 1.3, DNS and TLS-client checks
+  from the internet.
+- `scripts/ami-publish.py`, `scripts/smoke-ec2.sh`, `scripts/ec2-console.sh`
+  and `make ami-publish / smoke-ec2 / ami-clean`.
 
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.

@@ -143,7 +143,7 @@ smoke-m1: asterinas
 KERNEL      ?= asterinas
 DISK        := $(BUILD)/disk-$(KERNEL).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error ip=dhcp
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
@@ -158,6 +158,9 @@ $(DISK): $(INITRAMFS) $(DISK_KERNEL_$(KERNEL)) scripts/mkdisk.sh
 # 128 MB load address: "error: out of memory" at 160M, fine at 256M. EC2's smallest
 # instances have 512 MB+ anyway.
 DISK_MEM    ?= 256M
+# Asterinas log level baked into the disk image. `info` logs every syscall and
+# overflows the 64 KB EC2 console buffer within seconds; keep `error` for images.
+DISK_LOGLEVEL ?= error
 QEMU_DISK = $(QEMU_BASE) -smp $(M1_SMP) -m $(DISK_MEM) \
   -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
   -drive if=none,id=d0,format=raw,file=$(BUILD)/disk-boot.raw -device nvme,drive=d0,serial=eu0001
