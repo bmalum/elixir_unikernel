@@ -1,8 +1,8 @@
 # Asterinas patches
 
 `scripts/build-asterinas.sh` applies every `builder/asterinas-patches/*.patch`
-to the Asterinas checkout before building. Both current patches are small,
-were found by running this image, and should go upstream. Until then they
+to the Asterinas checkout before building. The patches are small, were found
+by running this image, and should go upstream. Until then they
 are documented here so that nobody is surprised that the kernel is not
 pristine `3d85cb4`.
 
@@ -57,9 +57,38 @@ Lesson recorded for the next kernel: when a "livelock" log is dominated by
 one syscall returning immediately, suspect spurious readiness before locks,
 and write the ten-line reproducer first.
 
+## 0003: runtime interface configuration (SIOCSIFADDR and friends)
+
+Symptom: `/init` configures `eth0` the way `ifconfig` does, with
+`SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS` and `SIOCADDRT`. On Asterinas
+every one of them returned `ENOTTY`; the kernel only implemented the `GET`
+variants and hardcodes `10.0.2.15/24` via `10.0.2.2` for the virtio NIC in
+`kernel/core/src/net/iface/init.rs`. That happens to match QEMU's user-mode
+network, so nothing visibly broke under QEMU, but on EC2 the address comes
+from DHCP and must be set at runtime.
+
+The patch adds the setters:
+
+- `aster-bigtcp`: `Iface::set_ipv4_cidr` and `Iface::set_ipv4_gateway`
+  update smoltcp's `ip_addrs` and default route under the interface lock.
+- `kernel/core/src/net/route`: the two route managers move into an
+  `RwLock` and `route::reload()` rebuilds the local/main tables from the
+  interfaces' current addresses, so `bind()` and output-interface lookups
+  see the new address immediately.
+- `kernel/core/src/net/socket/ip/ioctl.rs`: `SIOCSIFADDR`, `SIOCSIFNETMASK`,
+  `SIOCSIFBRDADDR` (accepted; broadcast is derived), `SIOCADDRT` and
+  `SIOCDELRT` for the default route (`struct rtentry`, gateway only).
+- `kernel/core/src/net/socket/util/ioctl.rs`: `SIOCSIFFLAGS` is accepted
+  (interfaces are always up).
+
+Verified by booting with `uniapp.ip=10.0.9.77/24 uniapp.gw=10.0.9.2` on a
+QEMU user network `10.0.9.0/24`: the guest answers on the new address and
+the DNS and TLS probes pass, which they cannot with the compiled-in
+`10.0.2.15`. Limits: one IPv4 address per interface, default route only.
+
 ## Reporting upstream
 
-Both patches are `git diff` output against `3d85cb4` and apply with
+The patches are `git diff` output against `3d85cb4` and apply with
 `git apply`. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
 reproducer for 0002 and the `gen_tcp:listen` reproducer for 0001; the

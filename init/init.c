@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <net/if.h>
 #include <net/route.h>
@@ -35,6 +36,11 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <time.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include <poll.h>
 
 #ifndef RELEASE_ROOT
 #define RELEASE_ROOT "/rel"
@@ -162,6 +168,119 @@ static int find_eth(int s, char *out, size_t outsz) {
     return -1;
 }
 
+
+/* ---- minimal DHCPv4 client -------------------------------------------------
+ * DISCOVER/OFFER/REQUEST/ACK over a raw AF_PACKET socket (the interface has
+ * no address yet, so a normal UDP socket cannot send). Options understood:
+ * subnet mask, router, DNS, server id, message type. No renewal: EC2 and QEMU
+ * never revoke an address during the life of the instance.
+ */
+struct dhcp_lease { in_addr_t ip, mask, gw, dns; };
+
+struct dhcp_msg {
+    uint8_t op, htype, hlen, hops; uint32_t xid; uint16_t secs, flags;
+    uint32_t ciaddr, yiaddr, siaddr, giaddr; uint8_t chaddr[16];
+    uint8_t sname[64], file[128]; uint32_t magic; uint8_t opts[312];
+} __attribute__((packed));
+
+static uint16_t csum16(const void *data, size_t len) {
+    const uint8_t *p = data; uint32_t sum = 0;
+    for (; len > 1; len -= 2, p += 2) sum += (p[0] << 8) | p[1];
+    if (len) sum += p[0] << 8;
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return htons((uint16_t)~sum);
+}
+
+static int dhcp_send(int s, int ifindex, const uint8_t *mac, uint32_t xid, int type,
+                     in_addr_t req_ip, in_addr_t server) {
+    struct { struct iphdr ip; struct udphdr udp; struct dhcp_msg d; } __attribute__((packed)) pkt;
+    memset(&pkt, 0, sizeof pkt);
+    struct dhcp_msg *d = &pkt.d;
+    d->op = 1; d->htype = 1; d->hlen = 6; d->xid = xid; d->flags = htons(0x8000);
+    memcpy(d->chaddr, mac, 6); d->magic = htonl(0x63825363);
+    uint8_t *o = d->opts;
+    *o++ = 53; *o++ = 1; *o++ = (uint8_t)type;
+    if (type == 3) {
+        *o++ = 50; *o++ = 4; memcpy(o, &req_ip, 4); o += 4;
+        *o++ = 54; *o++ = 4; memcpy(o, &server, 4); o += 4;
+    }
+    *o++ = 55; *o++ = 3; *o++ = 1; *o++ = 3; *o++ = 6;   /* parameter request: mask, router, dns */
+    *o++ = 255;
+    size_t dlen = (size_t)(o - (uint8_t *)d);
+    if (dlen < 300) dlen = 300;                          /* BOOTP minimum */
+    size_t ulen = sizeof pkt.udp + dlen, tlen = sizeof pkt.ip + ulen;
+    pkt.udp.source = htons(68); pkt.udp.dest = htons(67); pkt.udp.len = htons((uint16_t)ulen); pkt.udp.check = 0;
+    pkt.ip.version = 4; pkt.ip.ihl = 5; pkt.ip.tot_len = htons((uint16_t)tlen); pkt.ip.ttl = 64;
+    pkt.ip.protocol = IPPROTO_UDP; pkt.ip.daddr = 0xffffffff; pkt.ip.check = csum16(&pkt.ip, sizeof pkt.ip);
+    struct sockaddr_ll to; memset(&to, 0, sizeof to);
+    to.sll_family = AF_PACKET; to.sll_protocol = htons(ETH_P_IP); to.sll_ifindex = ifindex;
+    to.sll_halen = 6; memset(to.sll_addr, 0xff, 6);
+    return sendto(s, &pkt, tlen, 0, (struct sockaddr *)&to, sizeof to) < 0 ? -1 : 0;
+}
+
+/* wait up to `ms` for a DHCP message of type `want` with our xid; fill lease */
+static int dhcp_recv(int s, uint32_t xid, int want, struct dhcp_lease *l, in_addr_t *server, int ms) {
+    for (;;) {
+        struct pollfd pf = { s, POLLIN, 0 };
+        if (poll(&pf, 1, ms) <= 0) return -1;
+        uint8_t buf[1500];
+        ssize_t n = recv(s, buf, sizeof buf, 0);
+        if (n < (ssize_t)(sizeof(struct iphdr) + sizeof(struct udphdr) + 240)) continue;
+        struct iphdr *ip = (struct iphdr *)buf;
+        if (ip->protocol != IPPROTO_UDP) continue;
+        struct udphdr *udp = (struct udphdr *)(buf + ip->ihl * 4);
+        if (ntohs(udp->dest) != 68) continue;
+        struct dhcp_msg *d = (struct dhcp_msg *)((uint8_t *)udp + sizeof *udp);
+        if (d->op != 2 || d->xid != xid || ntohl(d->magic) != 0x63825363) continue;
+        int type = 0; in_addr_t srv = 0; struct dhcp_lease got = { d->yiaddr, 0, 0, 0 };
+        uint8_t *o = d->opts, *end = buf + n;
+        while (o < end && *o != 255) {
+            if (*o == 0) { o++; continue; }
+            uint8_t code = o[0], len = o[1]; uint8_t *v = o + 2;
+            if (v + len > end) break;
+            if (code == 53 && len >= 1) type = v[0];
+            if (code == 1 && len >= 4) memcpy(&got.mask, v, 4);
+            if (code == 3 && len >= 4) memcpy(&got.gw, v, 4);
+            if (code == 6 && len >= 4) memcpy(&got.dns, v, 4);
+            if (code == 54 && len >= 4) memcpy(&srv, v, 4);
+            o = v + len;
+        }
+        if (type != want) continue;
+        *l = got; if (server) *server = srv ? srv : ip->saddr;
+        return 0;
+    }
+}
+
+static int dhcp_client(int ctl, const char *eth, struct dhcp_lease *lease) {
+    struct ifreq ifr; memset(&ifr, 0, sizeof ifr); strncpy(ifr.ifr_name, eth, IFNAMSIZ - 1);
+    if (ioctl(ctl, SIOCGIFINDEX, &ifr) < 0) { logmsg("dhcp: SIOCGIFINDEX: %s", strerror(errno)); return -1; }
+    int ifindex = ifr.ifr_ifindex;
+    if (ioctl(ctl, SIOCGIFHWADDR, &ifr) < 0) { logmsg("dhcp: SIOCGIFHWADDR: %s", strerror(errno)); return -1; }
+    uint8_t mac[6]; memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
+    if (if_set_flags(ctl, eth, IFF_UP) < 0) { logmsg("dhcp: %s up: %s", eth, strerror(errno)); return -1; }
+
+    int s = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+    if (s < 0) { logmsg("dhcp: AF_PACKET: %s", strerror(errno)); return -1; }
+    struct sockaddr_ll sll; memset(&sll, 0, sizeof sll);
+    sll.sll_family = AF_PACKET; sll.sll_protocol = htons(ETH_P_IP); sll.sll_ifindex = ifindex;
+    if (bind(s, (struct sockaddr *)&sll, sizeof sll) < 0) { logmsg("dhcp: bind: %s", strerror(errno)); close(s); return -1; }
+
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    uint32_t xid = (uint32_t)t.tv_nsec ^ ((uint32_t)mac[5] << 24) ^ (uint32_t)mac[4];
+    in_addr_t server = 0; int rc = -1;
+    for (int attempt = 0, wait = 2000; attempt < 5 && rc < 0; attempt++, wait = wait < 8000 ? wait * 2 : 8000) {
+        if (dhcp_send(s, ifindex, mac, xid, 1, 0, 0) < 0) { logmsg("dhcp: send discover: %s", strerror(errno)); break; }
+        if (dhcp_recv(s, xid, 2, lease, &server, wait) < 0) { logmsg("dhcp: no offer (attempt %d)", attempt + 1); continue; }
+        if (dhcp_send(s, ifindex, mac, xid, 3, lease->ip, server) < 0) break;
+        if (dhcp_recv(s, xid, 5, lease, NULL, wait) == 0) rc = 0;
+        else logmsg("dhcp: no ack (attempt %d)", attempt + 1);
+    }
+    close(s);
+    return rc;
+}
+
+static in_addr_t g_dns;   /* nameserver chosen by setup_net, used by setup_inetrc */
+
 static void setup_net(void) {
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) { logmsg("socket: %s", strerror(errno)); return; }
@@ -171,33 +290,46 @@ static void setup_net(void) {
     if (if_set_flags(s, "lo", IFF_UP | IFF_RUNNING) < 0)
         logmsg("lo up: %s", strerror(errno));
 
-    const char *ip = param("uniapp.ip");
-    if (!ip) ip = "10.0.2.15/24";
-    const char *gw = param("uniapp.gw");
-    if (!gw) gw = "10.0.2.2";
-
-    char ipbuf[64];
-    snprintf(ipbuf, sizeof ipbuf, "%s", ip);
-    int prefix = 24;
-    char *slash = strchr(ipbuf, '/');
-    if (slash) { *slash = 0; prefix = atoi(slash + 1); }
-
     char eth[IFNAMSIZ] = "eth0";
     if (find_eth(s, eth, sizeof eth) < 0) {
         logmsg("no ethernet interface found; skipping network");
         close(s);
         return;
     }
+    const char *ip = param("uniapp.ip");
+    const char *gw = param("uniapp.gw");
+    const char *dns = param("uniapp.dns");
+    struct in_addr a, g; in_addr_t mask; int prefix = 24;
+    char ipbuf[64]; const char *how;
 
-    struct in_addr a, g;
-    if (inet_pton(AF_INET, ipbuf, &a) != 1) { logmsg("bad ip %s", ipbuf); close(s); return; }
-    in_addr_t mask = prefix == 0 ? 0 : htonl(~0u << (32 - prefix));
+    struct dhcp_lease lease;
+    if (!ip && dhcp_client(s, eth, &lease) == 0) {
+        how = "dhcp";
+        a.s_addr = lease.ip; mask = lease.mask ? lease.mask : htonl(0xffffff00);
+        g.s_addr = lease.gw; g_dns = lease.dns;
+        prefix = 32 - __builtin_ctz(ntohl(mask) ? ntohl(mask) : 1);
+        if (!ntohl(mask)) prefix = 0;
+    } else {
+        how = ip ? "static" : "default";
+        if (!ip) ip = "10.0.2.15/24";
+        if (!gw) gw = "10.0.2.2";
+        snprintf(ipbuf, sizeof ipbuf, "%s", ip);
+        char *slash = strchr(ipbuf, '/');
+        if (slash) { *slash = 0; prefix = atoi(slash + 1); }
+        if (inet_pton(AF_INET, ipbuf, &a) != 1) { logmsg("bad ip %s", ipbuf); close(s); return; }
+        mask = prefix == 0 ? 0 : htonl(~0u << (32 - prefix));
+        if (inet_pton(AF_INET, gw, &g) != 1) g.s_addr = 0;
+        g_dns = 0;
+    }
+    if (dns) { struct in_addr d; if (inet_pton(AF_INET, dns, &d) == 1) g_dns = d.s_addr; }
+    if (!g_dns) inet_pton(AF_INET, "10.0.2.3", (struct in_addr *)&g_dns);
+    inet_ntop(AF_INET, &a, ipbuf, sizeof ipbuf);
 
     if (if_set_addr(s, eth, SIOCSIFADDR, a.s_addr) < 0) logmsg("%s addr: %s", eth, strerror(errno));
     if (if_set_addr(s, eth, SIOCSIFNETMASK, mask) < 0) logmsg("%s netmask: %s", eth, strerror(errno));
     if (if_set_flags(s, eth, IFF_UP | IFF_RUNNING) < 0) logmsg("%s up: %s", eth, strerror(errno));
 
-    if (inet_pton(AF_INET, gw, &g) == 1) {
+    if (g.s_addr) {
         struct rtentry rt;
         memset(&rt, 0, sizeof rt);
         struct sockaddr_in *dst = (struct sockaddr_in *)&rt.rt_dst;
@@ -209,7 +341,9 @@ static void setup_net(void) {
         rt.rt_dev = eth;
         if (ioctl(s, SIOCADDRT, &rt) < 0) logmsg("default route: %s", strerror(errno));
     }
-    logmsg("net: %s %s/%d gw %s", eth, ipbuf, prefix, gw);
+    char gwbuf[32], dnsbuf[32];
+    inet_ntop(AF_INET, &g, gwbuf, sizeof gwbuf); inet_ntop(AF_INET, &g_dns, dnsbuf, sizeof dnsbuf);
+    logmsg("net: %s %s/%d gw %s dns %s (%s)", eth, ipbuf, prefix, gwbuf, dnsbuf, how);
     close(s);
 }
 
@@ -221,11 +355,7 @@ static void write_file(const char *path, const char *content) {
 }
 
 static void setup_inetrc(void) {
-    const char *dns = param("uniapp.dns");
-    if (!dns) dns = "10.0.2.3";
-    struct in_addr d;
-    if (inet_pton(AF_INET, dns, &d) != 1) { logmsg("bad dns %s", dns); return; }
-    unsigned char *b = (unsigned char *)&d.s_addr;
+    unsigned char *b = (unsigned char *)&g_dns;
     char buf[512];
     mkdir("/etc", 0755);
     /* inetrc: pure-Erlang resolver, no inet_gethost port program. */

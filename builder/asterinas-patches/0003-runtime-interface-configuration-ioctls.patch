@@ -1,0 +1,434 @@
+diff --git a/kernel/core/src/net/mod.rs b/kernel/core/src/net/mod.rs
+index 06644ee7..ba135877 100644
+--- a/kernel/core/src/net/mod.rs
++++ b/kernel/core/src/net/mod.rs
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
+ mod iface;
+-mod route;
++pub(crate) mod route;
+ pub(crate) mod socket;
+ pub(crate) mod uts_ns;
+ 
+diff --git a/kernel/core/src/net/route/mod.rs b/kernel/core/src/net/route/mod.rs
+index 35d20682..6d918c12 100644
+--- a/kernel/core/src/net/route/mod.rs
++++ b/kernel/core/src/net/route/mod.rs
+@@ -23,8 +23,49 @@ mod table;
+ 
+ use entry::{RouteAddressFamily, RouteEntry, RouteMetric, RouteTableId, RouteType};
+ 
+-static IPV4_ROUTE_MANAGER: Once<RouteManager<Ipv4Address>> = Once::new();
+-static IPV6_ROUTE_MANAGER: Once<RouteManager<Ipv6Address>> = Once::new();
++// Behind a lock so that `reload()` can rebuild the tables after an interface
++// address or gateway changed at runtime (`SIOCSIFADDR`, `SIOCADDRT`).
++static IPV4_ROUTE_MANAGER: Once<RwLock<RouteManager<Ipv4Address>>> = Once::new();
++static IPV6_ROUTE_MANAGER: Once<RwLock<RouteManager<Ipv6Address>>> = Once::new();
++
++const LOCAL_RULE_PRIORITY: u32 = 0;
++const MAIN_RULE_PRIORITY: u32 = 32766;
++const DEFAULT_RULE_PRIORITY: u32 = 32767;
++
++fn build_ipv4_manager() -> RouteManager<Ipv4Address> {
++    let routes = iface::iter_all_ifaces()
++        .flat_map(iface_ipv4_routes)
++        .collect();
++    RouteManager::new(
++        &[
++            Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
++            Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
++            Rule::lookup(DEFAULT_RULE_PRIORITY, RouteTableId::DEFAULT),
++        ],
++        routes,
++    )
++}
++
++fn build_ipv6_manager() -> RouteManager<Ipv6Address> {
++    let routes = iface::iter_all_ifaces()
++        .flat_map(iface_ipv6_routes)
++        .collect();
++    RouteManager::new(
++        &[
++            Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
++            Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
++        ],
++        routes,
++    )
++}
++
++/// Rebuilds the routing tables from the interfaces' current configuration.
++///
++/// Call after changing an interface's address, netmask or gateway.
++pub(crate) fn reload() {
++    *IPV4_ROUTE_MANAGER.get().unwrap().write() = build_ipv4_manager();
++    *IPV6_ROUTE_MANAGER.get().unwrap().write() = build_ipv6_manager();
++}
+ 
+ /// A route lookup key for one address family.
+ #[derive(Clone, Debug)]
+@@ -46,36 +87,8 @@ impl<A: RouteAddressFamily> RouteLookupKey<A> {
+ }
+ 
+ pub(super) fn init() {
+-    const LOCAL_RULE_PRIORITY: u32 = 0;
+-    const MAIN_RULE_PRIORITY: u32 = 32766;
+-    const DEFAULT_RULE_PRIORITY: u32 = 32767;
+-
+-    IPV4_ROUTE_MANAGER.call_once(|| {
+-        let routes = iface::iter_all_ifaces()
+-            .flat_map(iface_ipv4_routes)
+-            .collect();
+-        RouteManager::new(
+-            &[
+-                Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
+-                Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
+-                Rule::lookup(DEFAULT_RULE_PRIORITY, RouteTableId::DEFAULT),
+-            ],
+-            routes,
+-        )
+-    });
+-
+-    IPV6_ROUTE_MANAGER.call_once(|| {
+-        let routes = iface::iter_all_ifaces()
+-            .flat_map(iface_ipv6_routes)
+-            .collect();
+-        RouteManager::new(
+-            &[
+-                Rule::lookup(LOCAL_RULE_PRIORITY, RouteTableId::LOCAL),
+-                Rule::lookup(MAIN_RULE_PRIORITY, RouteTableId::MAIN),
+-            ],
+-            routes,
+-        )
+-    });
++    IPV4_ROUTE_MANAGER.call_once(|| RwLock::new(build_ipv4_manager()));
++    IPV6_ROUTE_MANAGER.call_once(|| RwLock::new(build_ipv6_manager()));
+ }
+ 
+ fn iface_ipv4_routes(iface: &Arc<Iface>) -> Vec<RouteEntry<Ipv4Address>> {
+@@ -194,12 +207,14 @@ pub(super) fn lookup_iface(dst: IpAddress) -> Result<Arc<Iface>> {
+         IpAddress::Ipv4(dst) => IPV4_ROUTE_MANAGER
+             .get()
+             .unwrap()
++            .read()
+             .lookup_entry(&RouteLookupKey::new(dst))?
+             .output_iface()
+             .clone(),
+         IpAddress::Ipv6(dst) => IPV6_ROUTE_MANAGER
+             .get()
+             .unwrap()
++            .read()
+             .lookup_entry(&RouteLookupKey::new(dst))?
+             .output_iface()
+             .clone(),
+@@ -214,6 +229,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
+             let entry = IPV4_ROUTE_MANAGER
+                 .get()
+                 .unwrap()
++                .read()
+                 .lookup_in_local_table(&RouteLookupKey::new(address))
+                 .ok_or_else(|| {
+                     Error::with_message(
+@@ -227,6 +243,7 @@ pub(super) fn lookup_local_iface(address: IpAddress) -> Result<Arc<Iface>> {
+             let entry = IPV6_ROUTE_MANAGER
+                 .get()
+                 .unwrap()
++                .read()
+                 .lookup_in_local_table(&RouteLookupKey::new(address))
+                 .ok_or_else(|| {
+                     Error::with_message(
+@@ -262,7 +279,6 @@ pub(super) fn is_broadcast_endpoint(endpoint: &IpEndpoint) -> bool {
+     address.is_broadcast()
+         || IPV4_ROUTE_MANAGER
+             .get()
+-            .unwrap()
+-            .lookup_entry(&RouteLookupKey::new(address))
++            .unwrap().read().lookup_entry(&RouteLookupKey::new(address))
+             .is_ok_and(|entry| entry.type_() == RouteType::Broadcast)
+ }
+diff --git a/kernel/core/src/net/socket/ip/ioctl.rs b/kernel/core/src/net/socket/ip/ioctl.rs
+index 6b765d91..98ff111f 100644
+--- a/kernel/core/src/net/socket/ip/ioctl.rs
++++ b/kernel/core/src/net/socket/ip/ioctl.rs
+@@ -1,20 +1,88 @@
+ // SPDX-License-Identifier: MPL-2.0
+ 
+-use aster_bigtcp::{iface::InterfaceFlags, wire::Ipv4Address};
+-
+-use crate::{dispatch_ioctl, net::socket::util::ioctl::CIfReq, prelude::*, util::ioctl::RawIoctl};
++use aster_bigtcp::{
++    iface::InterfaceFlags,
++    wire::{Ipv4Address, Ipv4Cidr},
++};
++use crate::{
++    dispatch_ioctl,
++    net::{route, socket::util::ioctl::CIfReq},
++    prelude::*,
++    util::ioctl::RawIoctl,
++};
+ 
+ mod ioctl_defs {
+-    use super::CIfReq;
+-    use crate::{ioc, util::ioctl::InOutData};
++    use super::{CIfReq, CRtEntry};
++    use crate::{ioc, util::ioctl::{InData, InOutData}};
+ 
+     // Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/sockios.h#L62>.
+     pub(super) type GetIfAddr    = ioc!(SIOCGIFADDR,    0x8915, InOutData<CIfReq>);
+     pub(super) type GetIfDstAddr = ioc!(SIOCGIFDSTADDR, 0x8917, InOutData<CIfReq>);
+     pub(super) type GetIfBrdAddr = ioc!(SIOCGIFBRDADDR, 0x8919, InOutData<CIfReq>);
+     pub(super) type GetIfNetmask = ioc!(SIOCGIFNETMASK, 0x891B, InOutData<CIfReq>);
++    pub(super) type SetIfAddr    = ioc!(SIOCSIFADDR,    0x8916, InData<CIfReq>);
++    pub(super) type SetIfBrdAddr = ioc!(SIOCSIFBRDADDR, 0x891A, InData<CIfReq>);
++    pub(super) type SetIfNetmask = ioc!(SIOCSIFNETMASK, 0x891C, InData<CIfReq>);
++    pub(super) type AddRoute     = ioc!(SIOCADDRT,      0x890B, InData<CRtEntry>);
++    pub(super) type DelRoute     = ioc!(SIOCDELRT,      0x890C, InData<CRtEntry>);
++}
++
++/// `struct rtentry` in Linux (x86-64 layout, 120 bytes).
++///
++/// Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/route.h#L30>.
++#[repr(C)]
++#[derive(Clone, Copy, Pod)]
++pub(super) struct CRtEntry {
++    pad1: u64,
++    dst: [u8; 16],
++    gateway: [u8; 16],
++    genmask: [u8; 16],
++    flags: u16,
++    pad2: i16,
++    pad2b: u32,
++    pad3: u64,
++    pad4: u64,
++    metric: i16,
++    pad5: [u8; 6],
++    dev: u64,
++    mtu: u64,
++    window: u64,
++    irtt: u16,
++    pad6: [u8; 6],
++}
++
++const RTF_GATEWAY: u16 = 0x0002;
++
++/// Extracts the IPv4 address of a `struct sockaddr_in` (AF_INET, port, addr).
++fn sockaddr_ipv4(sa: &[u8; 16]) -> Option<Ipv4Address> {
++    let family = u16::from_ne_bytes([sa[0], sa[1]]);
++    if family != 2 /* AF_INET */ && family != 0 {
++        return None;
++    }
++    Some(Ipv4Address::new(sa[4], sa[5], sa[6], sa[7]))
+ }
+ 
++/// Applies a new address or netmask to `iface`, keeping the other half of the
++/// CIDR, then rebuilds the routing tables.
++fn set_iface_ipv4(ifreq: &mut CIfReq, addr: Option<Ipv4Address>, netmask: Option<Ipv4Address>) -> Result<i32> {
++    let new = ifreq.get_sockaddr_ipv4()?;
++    let iface = ifreq.get_iface_by_name()?;
++    let cur = iface.ipv4_cidr();
++    let address = addr.or(new.into()).unwrap_or_else(|| cur.map(|c| c.address()).unwrap_or(Ipv4Address::UNSPECIFIED));
++    let (address, prefix) = match (addr, netmask) {
++        (Some(a), _) => (a, cur.map(|c| c.prefix_len()).unwrap_or(24)),
++        (None, Some(m)) => {
++            let bits = u32::from_be_bytes(m.octets()).count_ones() as u8;
++            (cur.map(|c| c.address()).unwrap_or(address), bits)
++        }
++        (None, None) => return Ok(0),
++    };
++    iface.set_ipv4_cidr(Ipv4Cidr::new(address, prefix));
++    route::reload();
++    Ok(0)
++}
++
++
+ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+     use ioctl_defs::*;
+ 
+@@ -68,6 +136,56 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+             cmd.write(&ifreq)?;
+             Ok(0)
+         }
++        cmd @ SetIfAddr => {
++            let mut ifreq = cmd.read()?;
++            let addr = ifreq.get_sockaddr_ipv4()?;
++            set_iface_ipv4(&mut ifreq, Some(addr), None)
++        }
++        cmd @ SetIfNetmask => {
++            let mut ifreq = cmd.read()?;
++            let mask = ifreq.get_sockaddr_ipv4()?;
++            set_iface_ipv4(&mut ifreq, None, Some(mask))
++        }
++        cmd @ SetIfBrdAddr => {
++            // The broadcast address is derived from address and netmask; accept and ignore.
++            let mut ifreq = cmd.read()?;
++            let _ = ifreq.get_iface_by_name()?;
++            Ok(0)
++        }
++        cmd @ AddRoute => {
++            let rt = cmd.read()?;
++            let dst = sockaddr_ipv4(&rt.dst).unwrap_or(Ipv4Address::UNSPECIFIED);
++            let mask = sockaddr_ipv4(&rt.genmask).unwrap_or(Ipv4Address::UNSPECIFIED);
++            if dst != Ipv4Address::UNSPECIFIED || mask != Ipv4Address::UNSPECIFIED {
++                // Only the default route is configurable for now; connected routes come from the address.
++                return_errno_with_message!(Errno::EINVAL, "only the default route can be added");
++            }
++            if rt.flags & RTF_GATEWAY == 0 {
++                return_errno_with_message!(Errno::EINVAL, "default route needs a gateway");
++            }
++            let gateway = sockaddr_ipv4(&rt.gateway)
++                .ok_or_else(|| Error::with_message(Errno::EINVAL, "bad gateway address"))?;
++            // The route goes to the interface that owns the gateway's network, else the default NIC.
++            let iface = crate::net::iface::iter_all_ifaces()
++                .find(|i| i.ipv4_cidr().is_some_and(|c| c.contains_addr(&gateway)))
++                .or_else(|| crate::net::iface::iter_all_ifaces().last())
++                .ok_or_else(|| Error::with_message(Errno::ENETUNREACH, "no interface"))?;
++            iface.set_ipv4_gateway(Some(gateway));
++            route::reload();
++            Ok(0)
++        }
++        cmd @ DelRoute => {
++            let rt = cmd.read()?;
++            let dst = sockaddr_ipv4(&rt.dst).unwrap_or(Ipv4Address::UNSPECIFIED);
++            if dst != Ipv4Address::UNSPECIFIED {
++                return_errno_with_message!(Errno::EINVAL, "only the default route can be deleted");
++            }
++            for iface in crate::net::iface::iter_all_ifaces() {
++                iface.set_ipv4_gateway(None);
++            }
++            route::reload();
++            Ok(0)
++        }
+         _ => return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown"),
+     })
+ }
+diff --git a/kernel/core/src/net/socket/util/ioctl.rs b/kernel/core/src/net/socket/util/ioctl.rs
+index a0bcae63..2464ec26 100644
+--- a/kernel/core/src/net/socket/util/ioctl.rs
++++ b/kernel/core/src/net/socket/util/ioctl.rs
+@@ -18,12 +18,13 @@ use crate::{
+ 
+ mod ioctl_defs {
+     use super::{CIfConf, CIfReq};
+-    use crate::{ioc, util::ioctl::InOutData};
++    use crate::{ioc, util::ioctl::{InData, InOutData}};
+ 
+     // Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/sockios.h#L56>.
+     pub(super) type GetIfName       = ioc!(SIOCGIFNAME,     0x8910, InOutData<CIfReq>);
+     pub(super) type GetIfConf       = ioc!(SIOCGIFCONF,     0x8912, InOutData<CIfConf>);
+     pub(super) type GetIfFlags      = ioc!(SIOCGIFFLAGS,    0x8913, InOutData<CIfReq>);
++    pub(super) type SetIfFlags      = ioc!(SIOCSIFFLAGS,    0x8914, InData<CIfReq>);
+     pub(super) type GetIfMetric     = ioc!(SIOCGIFMETRIC,   0x891D, InOutData<CIfReq>);
+     pub(super) type GetIfMtu        = ioc!(SIOCGIFMTU,      0x8921, InOutData<CIfReq>);
+     pub(super) type GetIfHwAddr     = ioc!(SIOCGIFHWADDR,   0x8927, InOutData<CIfReq>);
+@@ -73,6 +74,13 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+             cmd.write(&ifreq)?;
+             Ok(0)
+         }
++        cmd @ SetIfFlags => {
++            // Interfaces are always up in this kernel; accept the request so that
++            // `ifconfig`-style configuration (and /init programs) can proceed.
++            let mut ifreq = cmd.read()?;
++            let _ = ifreq.get_iface_by_name()?;
++            Ok(0)
++        }
+         cmd @ GetIfFlags => {
+             let mut ifreq = cmd.read()?;
+             let iface = ifreq.get_iface_by_name()?;
+@@ -265,6 +273,15 @@ impl CIfReq {
+         self.data = CIfReqData::new_addr(socket_addr);
+     }
+ 
++    /// Reads the IPv4 address from the `ifr_addr` member (a `struct sockaddr_in`).
++    pub(in crate::net::socket) fn get_sockaddr_ipv4(&self) -> Result<Ipv4Address> {
++        let sa = self.data.addr();
++        if sa.family != CSocketAddrFamily::AF_INET as u16 {
++            return_errno_with_message!(Errno::EAFNOSUPPORT, "ifr_addr is not AF_INET");
++        }
++        Ok(Ipv4Address::new(sa.data[2], sa.data[3], sa.data[4], sa.data[5]))
++    }
++
+     pub(in crate::net::socket) fn get_iface_by_name(&mut self) -> Result<&'static Arc<Iface>> {
+         iter_all_ifaces()
+             .find(|iface| iface.name() == &self.name)
+diff --git a/kernel/libs/aster-bigtcp/src/iface/common.rs b/kernel/libs/aster-bigtcp/src/iface/common.rs
+index ac4a0380..c5882f1d 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/common.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/common.rs
+@@ -16,7 +16,7 @@ use int_to_c_enum::TryFromInt;
+ use ostd::sync::{SpinLock, SpinLockGuard};
+ use smoltcp::{
+     iface::{Context, Route},
+-    wire::{IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
++    wire::{Ipv4Address, IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
+ };
+ 
+ use super::{
+@@ -144,6 +144,14 @@ impl<E: Ext> IfaceCommon<E> {
+         self.interface.lock().ipv4_cidr()
+     }
+ 
++    pub(super) fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
++        self.interface.lock().set_ipv4_cidr(cidr);
++    }
++
++    pub(super) fn set_ipv4_gateway(&self, gateway: Option<Ipv4Address>) {
++        self.interface.lock().set_ipv4_gateway(gateway);
++    }
++
+     pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
+         self.interface.lock().ipv6_cidr()
+     }
+diff --git a/kernel/libs/aster-bigtcp/src/iface/iface.rs b/kernel/libs/aster-bigtcp/src/iface/iface.rs
+index 8787f0a4..1f1d93b0 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/iface.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/iface.rs
+@@ -100,6 +100,17 @@ impl<E: Ext> dyn Iface<E> {
+         self.common().ipv4_cidr()?.broadcast()
+     }
+ 
++    /// Sets the IPv4 address and prefix of the iface at runtime (`SIOCSIFADDR`,
++    /// `SIOCSIFNETMASK`). Replaces any existing IPv4 address.
++    pub fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
++        self.common().set_ipv4_cidr(cidr);
++    }
++
++    /// Sets or clears the default IPv4 gateway of the iface at runtime (`SIOCADDRT`).
++    pub fn set_ipv4_gateway(&self, gateway: Option<Ipv4Address>) {
++        self.common().set_ipv4_gateway(gateway);
++    }
++
+     /// Returns routes currently installed in the interface.
+     pub fn routes(&self) -> Vec<Route> {
+         self.common().routes()
+diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
+index 5c9c197a..1b883d60 100644
+--- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
++++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
+@@ -57,6 +57,27 @@ impl<E: Ext> PollableIface<E> {
+         })
+     }
+ 
++    /// Replaces the IPv4 address of the interface (adding one if there was none).
++    pub(super) fn set_ipv4_cidr(&mut self, cidr: smoltcp::wire::Ipv4Cidr) {
++        self.interface.update_ip_addrs(|addrs| {
++            addrs.retain(|a| !matches!(a, smoltcp::wire::IpCidr::Ipv4(_)));
++            addrs.push(smoltcp::wire::IpCidr::Ipv4(cidr)).unwrap();
++        });
++    }
++
++    /// Replaces the default IPv4 route.
++    pub(super) fn set_ipv4_gateway(&mut self, gateway: Option<smoltcp::wire::Ipv4Address>) {
++        let routes = self.interface.routes_mut();
++        match gateway {
++            Some(gw) => {
++                routes.add_default_ipv4_route(gw).unwrap();
++            }
++            None => {
++                routes.remove_default_ipv4_route();
++            }
++        }
++    }
++
+     pub(super) fn routes(&mut self) -> Vec<Route> {
+         let mut routes = Vec::new();
+         self.interface.routes_mut().update(|route_entries| {

@@ -27,7 +27,11 @@ ROOTFS       := $(BUILD)/rootfs
 INITRAMFS    := $(BUILD)/initramfs.cpio.gz
 KERNEL_M1    := $(BUILD)/asterinas/aster-nix-osdk-bin
 TLS_HOST     ?= www.erlang.org
-NET_ARGS     := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3 uniapp.tls_host=$(TLS_HOST)
+# Static guest address for QEMU's user-mode network. Linux boots use DHCP
+# (STATIC_NET empty); Asterinas still needs the static values until its DHCP
+# client lands, see docs/book/src/internals/asterinas-patches.md.
+STATIC_NET   := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3
+NET_ARGS     := uniapp.tls_host=$(TLS_HOST)
 
 # Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
 # High numbers so a developer's local `iex -S mix` on 4000 never collides with the smoke test.
@@ -115,7 +119,7 @@ asterinas: $(KERNEL_M1)
 $(KERNEL_M1): scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
 	scripts/build-asterinas.sh $(ASTERINAS_REF) $(abspath $(INITRAMFS)) $(abspath $(BUILD))
 
-M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(NET_ARGS)
+M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(STATIC_NET) $(NET_ARGS)
 QEMU_M1 = $(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(KERNEL_M1) -initrd $(INITRAMFS)
 
 ## run-m1:      boot on Asterinas into IEx (exit QEMU: Ctrl-a x)
@@ -135,7 +139,7 @@ smoke-m1: asterinas
 KERNEL      ?= asterinas
 DISK        := $(BUILD)/disk-$(KERNEL).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error $(STATIC_NET)
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
