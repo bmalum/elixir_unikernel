@@ -190,15 +190,15 @@ ami-publish: $(DISK)
 smoke-ec2: $(DISK)
 	scripts/smoke-ec2.sh $$(scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)) $(KERNEL)
 
-## ami-clean:   deregister this version's AMIs and delete their snapshots (both kernels)
+## ami-clean:   deregister this version's AMIs (all kernels and modes) and delete their snapshots
 ami-clean:
-	@for k in linux asterinas; do \
-	  for ami in $$(aws ec2 describe-images --owners self --filters Name=name,Values=elixir_unikernel-$(VERSION)-$$k --query 'Images[].ImageId' --output text); do \
-	    snaps=$$(aws ec2 describe-images --image-ids $$ami --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text); \
-	    aws ec2 deregister-image --image-id $$ami && echo "deregistered $$ami"; \
-	    for s in $$snaps; do aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s"; done; \
-	  done; \
-	done
+	@for ami in $$(aws ec2 describe-images --owners self --filters "Name=name,Values=elixir_unikernel-$(VERSION)-*" --query 'Images[].ImageId' --output text); do \
+	  snaps=$$(aws ec2 describe-images --image-ids $$ami --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text); \
+	  aws ec2 deregister-image --image-id $$ami >/dev/null && echo "deregistered $$ami"; \
+	  for s in $$snaps; do aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s"; done; \
+	done; \
+	left=$$(aws ec2 describe-instances --filters Name=tag:Project,Values=elixir_unikernel Name=instance-state-name,Values=pending,running,stopping,stopped --query 'Reservations[].Instances[].InstanceId' --output text); \
+	[ -z "$$left" ] && echo "no live instances tagged Project=elixir_unikernel" || echo "WARNING: live instances: $$left"
 
 # ---------------------------------------------------------------- dist, docs, misc
 ## sizes:       print image sizes against the 40 MB budget
