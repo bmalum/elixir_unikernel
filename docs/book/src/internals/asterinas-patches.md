@@ -117,10 +117,63 @@ Measured under QEMU: the lease arrives 33 ms after boot, `/init` logs
 `net: eth0 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3 (kernel dhcp)`, and `make
 smoke-m1` passes without any `uniapp.ip=` parameter.
 
+## 0005: the ENA network driver
+
+EC2 Nitro instances have one NIC, the Elastic Network Adapter (PCI
+`1d0f:ec20`, also `0ec2`, `1ec2`, `ec21`). Asterinas has no driver for it,
+so the image had no network on EC2 (`[init] no ethernet interface found`).
+Patch 0005 adds `kernel/core/comps/ena`, a component crate of about 1000
+lines, and teaches `net/iface/init.rs` to use it for `eth0` when there is
+no virtio-net.
+
+Design, following `ena_com.c` in Linux so the pieces map one to one:
+
+- `regs.rs`: the BAR0 register map.
+- `admin.rs`: device reset, "readless" MMIO (the device answers register
+  reads by DMA into a host buffer; direct reads are the fallback), a
+  32-entry admin queue polled without interrupts, `GET_FEATURE`,
+  `SET_FEATURE`, `CREATE_CQ`, `CREATE_SQ`. The AENQ is allocated and
+  registered because the device insists, but no event group is enabled.
+- `io.rs`: 16-byte Tx/Rx descriptors, 8/16-byte completion descriptors,
+  128-entry rings in `DmaCoherent` memory with phase-bit completion.
+- `device.rs`: `AnyNetworkDevice` for one queue pair. Rx buffers are 4 KiB
+  pool segments handed to the device by `req_id` and refilled on
+  completion; the MTU is set to 1500 so no frame spans two buffers. Tx
+  uses one descriptor per packet (no meta descriptor, no offloads: smoltcp
+  computes every checksum). Doorbells: Tx on every send, Rx and the CQ
+  heads at the end of each poll, then the interrupt is unmasked.
+- Interrupts: MSI-X vector 1 for the queue pair (vector 0 would be the
+  admin queue and stays masked). Because MSI-X delivery on Nitro had not
+  been exercised by this kernel before, the driver also raises the network
+  softirqs from the timer tick every 4 ms; both paths are idempotent and
+  the tick only bounds latency if a message is lost.
+- Diagnostics: `found ...` and `... ready` go through `early_println!`,
+  so they appear at `loglevel=error`; if no ENA function is found the
+  driver lists every unclaimed PCI function. Per-packet logging is at
+  `debug`.
+
+Measured on a t3.small: the lease arrives 1.6 s after power-on, BEAM is up
+at 4.4 s, and `scripts/smoke-ec2.sh` passes 8 of 8 twice in a row (TCP and
+TLS 1.3 echo from the internet, DNS and TLS client probes). Known limits:
+one queue pair, no LLQ, no RSS, no checksum or segmentation offload, no
+AENQ handling (link changes and keep-alives are ignored), no device reset
+after a fatal error.
+
+Lesson from building it: the ENA loop is build, publish, launch, read the
+console, about six minutes per iteration and QEMU cannot shorten it (it
+has no ENA model). Two of the five iterations were spent on a tooling
+problem rather than the driver: `make ami` had silently rebuilt the kernel
+from the patch directory while a stale untracked file made patch 0004
+fail to apply, so the image on EC2 lacked both DHCP and ENA.
+`scripts/build-asterinas.sh` now cleans the tree and aborts when a patch
+does not apply.
+
 ## Reporting upstream
 
 The patches are `git diff` output against `3d85cb4`, apply in order with
-`git apply`, and each depends on the previous ones. To send them: open issues on
+`git apply`, and each depends on the previous ones. 0005 is a new crate
+rather than a fix and would go upstream as a pull request adding
+`kernel/core/comps/ena` plus the two-driver selection in `iface/init.rs`. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
 reproducer for 0002 and the `gen_tcp:listen` reproducer for 0001; the
 project's `CONTRIBUTING` asks for a regression test under

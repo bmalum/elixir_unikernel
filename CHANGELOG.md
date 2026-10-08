@@ -24,8 +24,15 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   queue). The Asterinas image boots on a t3.small, gets its address from
   the VPC's DHCP, and passes the TCP, TLS 1.3, DNS and TLS-client checks
   from the internet.
-- `scripts/ami-publish.py`, `scripts/smoke-ec2.sh`, `scripts/ec2-console.sh`
-  and `make ami-publish / smoke-ec2 / ami-clean`.
+- `scripts/ami-publish.py`, `scripts/smoke-ec2.sh`, `scripts/ec2-console.sh`,
+  `scripts/smoke-ec2-iex.sh` (IEx over the EC2 Serial Console) and
+  `make ami-publish / smoke-ec2 / ami-clean`; `DISK_MODE=iex` images.
+- Manual chapter "Running on EC2"; ENA driver notes in the patches chapter.
+
+### Fixed
+- `scripts/build-asterinas.sh` aborts when a patch does not apply and
+  cleans stale untracked files first; previously it built silently without
+  the failed patches.
 
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.

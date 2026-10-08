@@ -15,6 +15,7 @@
 - [Shipping your own application](guide/your-app.md)
 - [A Phoenix application](guide/phoenix.md)
 - [Releasing a bundle](guide/release.md)
+- [Running on EC2](guide/ec2.md)
 - [Troubleshooting](guide/troubleshooting.md)
 
 # Reference

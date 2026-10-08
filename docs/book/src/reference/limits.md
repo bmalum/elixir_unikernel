@@ -45,6 +45,10 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
 - Terminfo: `TERM=dumb`, no colours in IEx.
 - IPv6: untested. DHCP: IPv4 only, one lease per boot (renewals are handled
   by the kernel client on Asterinas; `/init` on Linux does not renew).
+- EC2: x86-64 Nitro instances with ENA only (tested on t3.small); one Rx/Tx
+  queue pair without offloads, so throughput is a fraction of what the
+  instance allows. No EBS data volumes on Asterinas (its NVMe driver fails
+  on Nitro); no instance metadata, no IPv6.
 - Clean power-off from the guest: stopping the node leaves the kernel without
   an init process; QEMU keeps running.
 - Asterinas only: interface configuration from the command line (the address

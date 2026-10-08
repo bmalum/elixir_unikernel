@@ -1050,10 +1050,10 @@ index 00000000..f2af1563
 +}
 diff --git a/kernel/core/comps/ena/src/lib.rs b/kernel/core/comps/ena/src/lib.rs
 new file mode 100644
-index 00000000..b1c346c9
+index 00000000..98ed3cf1
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/lib.rs
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,218 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! Driver for the Amazon Elastic Network Adapter (ENA), the NIC of EC2
@@ -1132,6 +1132,8 @@ index 00000000..b1c346c9
 +#[derive(Debug)]
 +struct EnaPciDriver {
 +    probed: SpinLock<Vec<Probed>>,
++    /// Every unclaimed function we were offered and declined, for diagnostics.
++    declined: SpinLock<Vec<(PciDeviceId, aster_pci::PciDeviceLocation)>>,
 +}
 +
 +impl core::fmt::Debug for Probed {
@@ -1147,9 +1149,16 @@ index 00000000..b1c346c9
 +    ) -> Result<Arc<dyn PciDevice>, (BusProbeError, PciCommonDevice)> {
 +        let id = *device.device_id();
 +        if id.vendor_id != ENA_VENDOR || !ENA_DEVICES.contains(&id.device_id) {
++            self.declined.lock().push((id, *device.location()));
 +            return Err((BusProbeError::DeviceNotMatch, device));
 +        }
-+        ostd::info!("found {:04x}:{:04x} rev {} at {:?}", id.vendor_id, id.device_id, id.revision_id, device.location());
++        ostd::early_println!(
++            "[kernel] ena: found {:04x}:{:04x} rev {} at {:?}",
++            id.vendor_id,
++            id.device_id,
++            id.revision_id,
++            device.location()
++        );
 +
 +        let bar0 = match device.bar_manager_mut().bar_mut(0) {
 +            Some(bar @ Bar::Memory(_)) => match bar {
@@ -1208,23 +1217,47 @@ index 00000000..b1c346c9
 +#[init_component]
 +fn ena_init() -> Result<(), ComponentInitError> {
 +    device::init_pools();
-+    let driver = Arc::new(EnaPciDriver { probed: SpinLock::new(Vec::new()) });
++    let driver = Arc::new(EnaPciDriver {
++        probed: SpinLock::new(Vec::new()),
++        declined: SpinLock::new(Vec::new()),
++    });
 +    DRIVER.call_once(|| driver.clone());
 +    PCI_BUS.lock().register_driver(driver.clone());
 +
 +    let probed: Vec<Probed> = core::mem::take(&mut *driver.probed.lock());
++    if probed.is_empty() {
++        // Visible at every log level: on EC2 this is the line that explains "no network".
++        let declined = driver.declined.lock();
++        ostd::early_println!(
++            "[kernel] ena: no ENA function among the {} unclaimed PCI functions:",
++            declined.len()
++        );
++        for (id, loc) in declined.iter() {
++            ostd::early_println!(
++                "[kernel] ena:   {:02x}:{:02x}.{} {:04x}:{:04x} class {:02x}/{:02x}/{:02x}",
++                loc.bus,
++                loc.device,
++                loc.function,
++                id.vendor_id,
++                id.device_id,
++                id.class,
++                id.subclass,
++                id.prog_if
++            );
++        }
++    }
 +    let mut registered = 0;
 +    for p in probed {
 +        let admin = match admin::AdminQueue::new(p.bar0) {
 +            Ok(a) => a,
 +            Err(e) => {
-+                ostd::error!("{:04x}:{:04x}: admin queue init failed: {:?}", p.id.vendor_id, p.id.device_id, e);
++                ostd::early_println!("[kernel] ena: {:04x}:{:04x}: admin queue init failed: {:?}", p.id.vendor_id, p.id.device_id, e);
 +                continue;
 +            }
 +        };
 +        match EnaDevice::init(admin, p.msix) {
 +            Ok(()) => registered += 1,
-+            Err(e) => ostd::error!("{:04x}:{:04x}: device init failed: {:?}", p.id.vendor_id, p.id.device_id, e),
++            Err(e) => ostd::early_println!("[kernel] ena: {:04x}:{:04x}: device init failed: {:?}", p.id.vendor_id, p.id.device_id, e),
 +        }
 +        // One interface is all the network stack binds to today.
 +        break;

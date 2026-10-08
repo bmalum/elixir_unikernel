@@ -26,5 +26,5 @@ ssh-keygen -q -t ed25519 -N '' -f "$KEY"
 aws ec2-instance-connect send-serial-console-ssh-public-key --instance-id "$INSTANCE" \
   --serial-port 0 --ssh-public-key "file://$KEY.pub" >/dev/null
 echo "connecting to $INSTANCE serial port 0 (exit with ~.)" >&2
-exec ssh -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+exec ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   "$INSTANCE.port0@serial-console.ec2-instance-connect.$REGION.aws"

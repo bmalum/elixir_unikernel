@@ -141,7 +141,9 @@ smoke-m1: asterinas
 # ---------------------------------------------------------------- disk image (EC2 / UEFI)
 # KERNEL=asterinas (default) or KERNEL=linux (reference kernel with ENA+NVMe).
 KERNEL      ?= asterinas
-DISK        := $(BUILD)/disk-$(KERNEL).raw
+# DISK_MODE=app|iex is baked into the image (an EC2 instance has no -append).
+DISK_MODE   ?= app
+DISK        := $(BUILD)/disk-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
 DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
@@ -151,7 +153,7 @@ DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
 ## ami:         UEFI/GPT disk image with GRUB, kernel and initramfs -> build/disk-<KERNEL>.raw
 ami: $(DISK)
 $(DISK): $(INITRAMFS) $(DISK_KERNEL_$(KERNEL)) scripts/mkdisk.sh
-	DISK_MB=1024 ESP_MB=94 KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=app"
+	DISK_MB=1024 ESP_MB=94 KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=$(DISK_MODE)"
 
 # A copy is booted so QEMU's firmware never writes into the artefact.
 # GRUB needs room for kernel + initramfs + the multiboot2 copy below the kernel's
@@ -179,7 +181,7 @@ smoke-disk: $(INITRAMFS) $(DISK_KERNEL_$(KERNEL))
 	  "scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $(BUILD)/disk-boot.raw"
 
 # EC2. Credentials and region come from the environment (AWS_PROFILE, AWS_REGION).
-AMI_NAME = elixir_unikernel-$(VERSION)-$(KERNEL)
+AMI_NAME = elixir_unikernel-$(VERSION)-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),)
 ## ami-publish: upload build/disk-$(KERNEL).raw as an AMI (EBS direct API, ~15 s); prints the id
 ami-publish: $(DISK)
 	scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)
