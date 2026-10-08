@@ -7,10 +7,12 @@ Rust kernel and starts directly into an Elixir application (or IEx) with
 working TCP/UDP and TLS. No Linux, no shell, no init system; the only userland
 is ERTS itself.
 
-## Status (2026-10-07)
+## Status (2026-10-08)
 
 M0, M1 and M2 are done; `make smoke` is green on this machine (Apple Silicon,
-QEMU TCG). Measured against the criteria below:
+QEMU TCG). The EC2 goal (docs/GOALS-EC2.md) is done: the Asterinas image
+runs as an AMI on a t3.small with its own ENA driver. Measured against the
+criteria below:
 
 | # | criterion | result |
 |---|---|---|
