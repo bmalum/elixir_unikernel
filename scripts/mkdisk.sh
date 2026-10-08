@@ -12,12 +12,15 @@
 #
 # KERNEL_KIND=asterinas (default) boots with `multiboot2` + `module2`;
 # KERNEL_KIND=linux boots with `linux` + `initrd`.
-# DISK_MB (default 96) sets the image size; EC2 import rounds up to 1 GiB.
+# DISK_MB (default 96) sets the image size, ESP_MB (default DISK_MB-2) the
+# size of the single partition. `make ami` uses DISK_MB=1024 so the GPT matches
+# EBS's 1 GiB minimum volume; the unused tail is all zeros and never uploaded.
 set -euo pipefail
 KERNEL=$1; INITRAMFS=$2; OUT=$3; shift 3
 CMDLINE=${*:-"console=ttyS0 earlycon loglevel=error uniapp.mode=app"}
 KIND=${KERNEL_KIND:-asterinas}
 DISK_MB=${DISK_MB:-96}
+ESP_MB=${ESP_MB:-$((DISK_MB - 2))}
 
 # Work dir under the output dir: macOS mktemp paths are not shared with the Docker VM.
 WORK=$(cd "$(dirname "$OUT")" && pwd)/.mkdisk; rm -rf "$WORK"; trap 'rm -rf "$WORK"' EXIT
@@ -66,10 +69,9 @@ docker run --rm --platform linux/amd64 -v "$WORK":/w -v "$(cd "$(dirname "$OUT")
   OUT=/out/'"$(basename "$OUT")"'
   rm -f "$OUT"; truncate -s '"$DISK_MB"'M "$OUT"
   sgdisk -Z "$OUT" >/dev/null
-  sgdisk -n 1:2048:0 -t 1:ef00 -c 1:ESP "$OUT" >/dev/null
-  # partition 1 starts at sector 2048 = 1 MiB; size = disk - 1 MiB - 33 sectors GPT backup (round down)
-  PSIZE_KB=$(( ('"$DISK_MB"' * 1024) - 1024 - 64 ))
-  mkfs.vfat -F 32 -n ESP -C /w/esp.img $PSIZE_KB >/dev/null
+  # partition 1 starts at sector 2048 = 1 MiB and is ESP_MB long
+  sgdisk -n 1:2048:+'"$ESP_MB"'M -t 1:ef00 -c 1:ESP "$OUT" >/dev/null
+  mkfs.vfat -F 32 -n ESP -C /w/esp.img $(( '"$ESP_MB"' * 1024 )) >/dev/null
   mcopy -i /w/esp.img -s /w/esp/* ::
   dd if=/w/esp.img of="$OUT" bs=1M seek=1 conv=notrunc status=none
   sgdisk -p "$OUT" | tail -3

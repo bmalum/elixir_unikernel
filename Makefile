@@ -98,6 +98,11 @@ QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu I
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 M0_CMDLINE = console=ttyS0 quiet loglevel=3 rdinit=/init $(NET_ARGS)
+## ec2-kernel:  build Linux 6.1 with ENA/NVMe/EFI for the Linux AMI  -> build/vmlinux-ec2
+ec2-kernel: $(BUILD)/vmlinux-ec2
+$(BUILD)/vmlinux-ec2: scripts/build-linux-ec2.sh $(BUILD)/vmlinux-m0
+	scripts/build-linux-ec2.sh $(BUILD)
+
 QEMU_M0 = $(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)
 
 ## run-m0:      boot on Linux into IEx (exit QEMU: Ctrl-a x)
@@ -146,7 +151,7 @@ DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
 ## ami:         UEFI/GPT disk image with GRUB, kernel and initramfs -> build/disk-<KERNEL>.raw
 ami: $(DISK)
 $(DISK): $(INITRAMFS) $(DISK_KERNEL_$(KERNEL)) scripts/mkdisk.sh
-	KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=app"
+	DISK_MB=1024 ESP_MB=94 KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=app"
 
 # A copy is booted so QEMU's firmware never writes into the artefact.
 # GRUB needs room for kernel + initramfs + the multiboot2 copy below the kernel's
@@ -169,6 +174,26 @@ smoke-disk: $(INITRAMFS) $(DISK_KERNEL_$(KERNEL))
 	@test -n "$(OVMF)" || { echo "OVMF firmware not found; set OVMF=..."; exit 1; }
 	KERNEL_KIND=$(KERNEL) SMOKE_DISK=1 scripts/smoke.sh disk-$(KERNEL) "$(QEMU_DISK)" "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS)" \
 	  "scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $(BUILD)/disk-boot.raw"
+
+# EC2. Credentials and region come from the environment (AWS_PROFILE, AWS_REGION).
+AMI_NAME = elixir_unikernel-$(VERSION)-$(KERNEL)
+## ami-publish: upload build/disk-$(KERNEL).raw as an AMI (EBS direct API, ~15 s); prints the id
+ami-publish: $(DISK)
+	scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)
+
+## smoke-ec2:   publish (or reuse) the AMI, boot a t3.small, run the assertions, terminate
+smoke-ec2: $(DISK)
+	scripts/smoke-ec2.sh $$(scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)) $(KERNEL)
+
+## ami-clean:   deregister this version's AMIs and delete their snapshots (both kernels)
+ami-clean:
+	@for k in linux asterinas; do \
+	  for ami in $$(aws ec2 describe-images --owners self --filters Name=name,Values=elixir_unikernel-$(VERSION)-$$k --query 'Images[].ImageId' --output text); do \
+	    snaps=$$(aws ec2 describe-images --image-ids $$ami --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text); \
+	    aws ec2 deregister-image --image-id $$ami && echo "deregistered $$ami"; \
+	    for s in $$snaps; do aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s"; done; \
+	  done; \
+	done
 
 # ---------------------------------------------------------------- dist, docs, misc
 ## sizes:       print image sizes against the 40 MB budget
