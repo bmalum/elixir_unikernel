@@ -1,7 +1,7 @@
 # Goal: elixir_unikernel as an EC2 AMI on Asterinas
 
 Repo: https://github.com/bmalum/elixir_unikernel (local: ~/Development/elixir_unikernel).
-Read GOALS.md and docs/GOALS-EC2.md first. Branch `ec2`, small commits, `make smoke` stays green.
+Read GOALS.md and docs/GOALS-EC2.md first. Branch `ec2`, small commits, keep `make smoke` green.
 
 ## Outcome
 
@@ -19,7 +19,7 @@ Console, echoes on TCP 4000 and TLS 1.3 4443 from the internet, prints `PROBE dn
    `make smoke-m0`/`smoke-m1` pass without static net parameters (QEMU user net serves DHCP).
 3. Asterinas honours `SIOCSIFADDR/SIOCSIFNETMASK/SIOCSIFFLAGS/SIOCADDRT` at runtime, as
    `builder/asterinas-patches/0003-*.patch` with an upstream-ready header.
-4. Asterinas reads the initramfs from the Nitro NVMe root volume on a t3 (console log).
+4. Asterinas reads the initramfs from the Nitro NVMe root volume on a t3 (console log as proof).
 5. Asterinas gets an ENA driver (PCI 1d0f:ec20; admin queue, one Tx/Rx pair, interrupts or
    polling) as a separate component crate registered with `aster-network`. Proof: 7 passes.
 6. `make ami-publish AWS_PROFILE=elixir-playground`: S3 upload, import-snapshot,
@@ -35,17 +35,15 @@ Console, echoes on TCP 4000 and TLS 1.3 4443 from the internet, prints `PROBE dn
    Nitro hardware with a known-good kernel.
 10. `make ami-clean VERSION=<v>` removes AMIs, snapshots and S3 objects; afterwards no
     non-terminated instances tagged `Project=elixir_unikernel` exist.
-11. Docs: manual chapter "Running on EC2", limits page (EC2 boot time, memory), CHANGELOG,
-    ENA driver design note (queues, omissions, how tested).
+11. Docs: manual chapter "Running on EC2", limits page, CHANGELOG, ENA driver design note.
 12. `make smoke` on `main` passes after merge.
 
 ## Constraints
 
 - Account: profile `elixir-playground` (Isengard, Admin, eu-central-1, 537124966503). Personal
   playground: tag everything, never leave an instance running (t3.small ≈ 18 USD/month),
-  nothing above t3.medium without asking. Needs Rosetta 2 on Apple Silicon (installed);
-  verify with `aws sts get-caller-identity --profile elixir-playground`.
-- Out of scope: Marketplace, Graviton, Xen instance types, data volumes.
+  nothing above t3.medium without asking. Verify access with `aws sts get-caller-identity --profile elixir-playground`.
+- Out of scope: Marketplace, Graviton, Xen instances, data volumes.
 - Kernel fixes are patches under builder/asterinas-patches/ with symptom/cause/fix headers and
   a reproducer; the ENA driver is new code kept applicable to upstream `main`.
 - QEMU has no ENA model: the ENA loop is build → publish → launch → read console (~5 min).
