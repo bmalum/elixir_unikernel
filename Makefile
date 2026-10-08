@@ -38,7 +38,8 @@ export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
 
 .DEFAULT_GOAL := help
 .PHONY: help check all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 \
-        asterinas run-m1 run-m1-app smoke-m1 smoke sizes dist docs docs-serve site clean
+        asterinas run-m1 run-m1-app smoke-m1 smoke sizes dist docs docs-serve site clean \
+        ami run-disk smoke-disk
 
 ## help:        list targets
 help:
@@ -128,6 +129,43 @@ run-m1-app: asterinas
 ## smoke-m1:    automated assertions on Asterinas
 smoke-m1: asterinas
 	scripts/smoke.sh m1 "$(QEMU_M1)" "$(M1_CMDLINE)"
+
+# ---------------------------------------------------------------- disk image (EC2 / UEFI)
+# KERNEL=asterinas (default) or KERNEL=linux (reference kernel with ENA+NVMe).
+KERNEL      ?= asterinas
+DISK        := $(BUILD)/disk-$(KERNEL).raw
+OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=error
+DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
+DISK_KERNEL_asterinas  = $(KERNEL_M1)
+DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
+
+## ami:         UEFI/GPT disk image with GRUB, kernel and initramfs -> build/disk-<KERNEL>.raw
+ami: $(DISK)
+$(DISK): $(INITRAMFS) $(DISK_KERNEL_$(KERNEL)) scripts/mkdisk.sh
+	KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=app"
+
+# A copy is booted so QEMU's firmware never writes into the artefact.
+# GRUB needs room for kernel + initramfs + the multiboot2 copy below the kernel's
+# 128 MB load address: "error: out of memory" at 160M, fine at 256M. EC2's smallest
+# instances have 512 MB+ anyway.
+DISK_MEM    ?= 256M
+QEMU_DISK = $(QEMU_BASE) -smp $(M1_SMP) -m $(DISK_MEM) \
+  -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
+  -drive if=none,id=d0,format=raw,file=$(BUILD)/disk-boot.raw -device nvme,drive=d0,serial=eu0001
+
+## run-disk:    boot the disk image in QEMU (UEFI + NVMe), app mode
+run-disk: $(DISK)
+	@test -n "$(OVMF)" || { echo "OVMF firmware not found; set OVMF=/path/to/edk2-x86_64-code.fd"; exit 1; }
+	cp $(DISK) $(BUILD)/disk-boot.raw
+	$(QEMU_DISK)
+
+## smoke-disk:  smoke test of the disk image (UEFI + NVMe); mode is baked into the image, so
+##              the script rebuilds it per mode
+smoke-disk: $(INITRAMFS) $(DISK_KERNEL_$(KERNEL))
+	@test -n "$(OVMF)" || { echo "OVMF firmware not found; set OVMF=..."; exit 1; }
+	KERNEL_KIND=$(KERNEL) SMOKE_DISK=1 scripts/smoke.sh disk-$(KERNEL) "$(QEMU_DISK)" "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS)" \
+	  "scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $(BUILD)/disk-boot.raw"
 
 # ---------------------------------------------------------------- dist, docs, misc
 ## sizes:       print image sizes against the 40 MB budget
