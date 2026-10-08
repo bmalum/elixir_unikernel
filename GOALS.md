@@ -64,6 +64,7 @@ livelock). Both are candidates for upstreaming; see docs/RESEARCH.md.
 | M0 | Shell-free release on a stock Linux kernel | Static-musl OTP 29.1.1 + Elixir 1.20.4 release with a static `/init`, boots to IEx and to app mode under QEMU with a stock Linux kernel (Firecracker CI build; Alpine `linux-virt` ships virtio-net as a module). Baselines size, RAM and boot time. |
 | M1 | Same initramfs on Asterinas | IEx prompt on serial; `:gen_tcp` over virtio-net. |
 | M2 | TLS, budgets, CI | `:ssl` client + server pass; ≤ 40 MB; 128 MB RAM; CI smoke test green. |
+| M3-EC2 | Asterinas AMI on EC2 | See [docs/GOALS-EC2.md](docs/GOALS-EC2.md): disk image, DHCP, runtime interface config, NVMe on Nitro, an ENA driver for Asterinas, publish and smoke-test an AMI. |
 | M3 (stretch) | Hermit unikernel port | OTP + OpenSSL cross-built for `x86_64-hermit`; patches for forker-as-thread, `pipe`/`socketpair` emulation, no `mremap`; same smoke tests pass. |
 
 ## Risks

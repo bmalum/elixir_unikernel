@@ -4,3 +4,4 @@ app/deps/
 *.log
 build.old/
 dist/
+.DS_Store
