@@ -1,8 +1,8 @@
 # Asterinas patches
 
 `scripts/build-asterinas.sh` applies every `builder/asterinas-patches/*.patch`
-to the Asterinas checkout before building. Both current patches are small,
-were found by running this image, and should go upstream. Until then they
+to the Asterinas checkout before building. The patches are small, were found
+by running this image, and should go upstream. Until then they
 are documented here so that nobody is surprised that the kernel is not
 pristine `3d85cb4`.
 
@@ -57,10 +57,123 @@ Lesson recorded for the next kernel: when a "livelock" log is dominated by
 one syscall returning immediately, suspect spurious readiness before locks,
 and write the ten-line reproducer first.
 
+## 0003: runtime interface configuration (SIOCSIFADDR and friends)
+
+Symptom: `/init` configures `eth0` the way `ifconfig` does, with
+`SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFFLAGS` and `SIOCADDRT`. On Asterinas
+every one of them returned `ENOTTY`; the kernel only implemented the `GET`
+variants and hardcodes `10.0.2.15/24` via `10.0.2.2` for the virtio NIC in
+`kernel/core/src/net/iface/init.rs`. That happens to match QEMU's user-mode
+network, so nothing visibly broke under QEMU, but on EC2 the address comes
+from DHCP and must be set at runtime.
+
+The patch adds the setters:
+
+- `aster-bigtcp`: `Iface::set_ipv4_cidr` and `Iface::set_ipv4_gateway`
+  update smoltcp's `ip_addrs` and default route under the interface lock.
+- `kernel/core/src/net/route`: the two route managers move into an
+  `RwLock` and `route::reload()` rebuilds the local/main tables from the
+  interfaces' current addresses, so `bind()` and output-interface lookups
+  see the new address immediately.
+- `kernel/core/src/net/socket/ip/ioctl.rs`: `SIOCSIFADDR`, `SIOCSIFNETMASK`,
+  `SIOCSIFBRDADDR` (accepted; broadcast is derived), `SIOCADDRT` and
+  `SIOCDELRT` for the default route (`struct rtentry`, gateway only).
+- `kernel/core/src/net/socket/util/ioctl.rs`: `SIOCSIFFLAGS` is accepted
+  (interfaces are always up).
+
+Verified by booting with `uniapp.ip=10.0.9.77/24 uniapp.gw=10.0.9.2` on a
+QEMU user network `10.0.9.0/24`: the guest answers on the new address and
+the DNS and TLS probes pass, which they cannot with the compiled-in
+`10.0.2.15`. Limits: one IPv4 address per interface, default route only.
+
+## 0004: in-kernel DHCPv4 client (`ip=dhcp`)
+
+Asterinas has no `AF_PACKET` sockets, so the DHCP client in `/init` cannot
+run there, and on EC2 the address is only available via DHCP. smoltcp, the
+network stack inside `aster-bigtcp`, ships a DHCPv4 client socket; this patch
+wires it in:
+
+- `Cargo.toml`: enables smoltcp's `socket-dhcpv4` feature.
+- `aster-bigtcp`: `EtherIface::new_dhcp` creates an interface without an
+  IPv4 address and a `Dhcpv4Socket` next to it. Ingress UDP from port 67 to
+  68 is fed to the client, the client's DISCOVER/REQUEST packets are emitted
+  through the normal UDP path (so broadcast and the unspecified source work),
+  and the client's retry timers take part in `next_poll_at_ms`. While no
+  address is set, unicast UDP to a not-yet-owned address is accepted,
+  because servers may unicast the OFFER to `yiaddr`. On `Configured` the
+  lease is applied with the setters from patch 0003, and
+  `CONFIG_GENERATION` is bumped.
+- `kernel/core/src/net/route`: the route tables rebuild lazily on the next
+  lookup when `CONFIG_GENERATION` changed, since the lease arrives in the
+  poll path, where the route lock cannot be taken.
+- `kernel/core/src/net/iface/init.rs`: `ip=dhcp` on the command line selects
+  `new_dhcp` for the virtio NIC; otherwise behaviour is unchanged.
+- `/proc/net/dhcp`: one line per DHCP-configured interface,
+  `eth0 10.0.2.15/24 10.0.2.2 dns 10.0.2.3`, or `eth0 pending`. Linux has no
+  such file (it has no in-kernel DHCP client); it is how `/init` learns the
+  nameserver.
+
+Measured under QEMU: the lease arrives 33 ms after boot, `/init` logs
+`net: eth0 10.0.2.15/24 gw 10.0.2.2 dns 10.0.2.3 (kernel dhcp)`, and `make
+smoke-m1` passes without any `uniapp.ip=` parameter.
+
+## 0005: the ENA network driver
+
+EC2 Nitro instances have one NIC, the Elastic Network Adapter (PCI
+`1d0f:ec20`, also `0ec2`, `1ec2`, `ec21`). Asterinas has no driver for it,
+so the image had no network on EC2 (`[init] no ethernet interface found`).
+Patch 0005 adds `kernel/core/comps/ena`, a component crate of about 1000
+lines, and teaches `net/iface/init.rs` to use it for `eth0` when there is
+no virtio-net.
+
+Design, following `ena_com.c` in Linux so the pieces map one to one:
+
+- `regs.rs`: the BAR0 register map.
+- `admin.rs`: device reset, "readless" MMIO (the device answers register
+  reads by DMA into a host buffer; direct reads are the fallback), a
+  32-entry admin queue polled without interrupts, `GET_FEATURE`,
+  `SET_FEATURE`, `CREATE_CQ`, `CREATE_SQ`. The AENQ is allocated and
+  registered because the device insists, but no event group is enabled.
+- `io.rs`: 16-byte Tx/Rx descriptors, 8/16-byte completion descriptors,
+  128-entry rings in `DmaCoherent` memory with phase-bit completion.
+- `device.rs`: `AnyNetworkDevice` for one queue pair. Rx buffers are 4 KiB
+  pool segments handed to the device by `req_id` and refilled on
+  completion; the MTU is set to 1500 so no frame spans two buffers. Tx
+  uses one descriptor per packet (no meta descriptor, no offloads: smoltcp
+  computes every checksum). Doorbells: Tx on every send, Rx and the CQ
+  heads at the end of each poll, then the interrupt is unmasked.
+- Interrupts: MSI-X vector 1 for the queue pair (vector 0 would be the
+  admin queue and stays masked). Because MSI-X delivery on Nitro had not
+  been exercised by this kernel before, the driver also raises the network
+  softirqs from the timer tick every 4 ms; both paths are idempotent and
+  the tick only bounds latency if a message is lost.
+- Diagnostics: `found ...` and `... ready` go through `early_println!`,
+  so they appear at `loglevel=error`; if no ENA function is found the
+  driver lists every unclaimed PCI function. Per-packet logging is at
+  `debug`.
+
+Measured on a t3.small: the lease arrives 1.6 s after power-on, BEAM is up
+at 4.4 s, and `scripts/smoke-ec2.sh` passes 8 of 8 twice in a row (TCP and
+TLS 1.3 echo from the internet, DNS and TLS client probes). Known limits:
+one queue pair, no LLQ, no RSS, no checksum or segmentation offload, no
+AENQ handling (link changes and keep-alives are ignored), no device reset
+after a fatal error.
+
+Lesson from building it: the ENA loop is build, publish, launch, read the
+console, about six minutes per iteration and QEMU cannot shorten it (it
+has no ENA model). Two of the five iterations were spent on a tooling
+problem rather than the driver: `make ami` had silently rebuilt the kernel
+from the patch directory while a stale untracked file made patch 0004
+fail to apply, so the image on EC2 lacked both DHCP and ENA.
+`scripts/build-asterinas.sh` now cleans the tree and aborts when a patch
+does not apply.
+
 ## Reporting upstream
 
-Both patches are `git diff` output against `3d85cb4` and apply with
-`git apply`. To send them: open issues on
+The patches are `git diff` output against `3d85cb4`, apply in order with
+`git apply`, and each depends on the previous ones. 0005 is a new crate
+rather than a fix and would go upstream as a pull request adding
+`kernel/core/comps/ena` plus the two-driver selection in `iface/init.rs`. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
 reproducer for 0002 and the `gen_tcp:listen` reproducer for 0001; the
 project's `CONTRIBUTING` asks for a regression test under

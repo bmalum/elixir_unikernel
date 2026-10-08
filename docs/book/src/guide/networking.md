@@ -1,28 +1,36 @@
 # Networking
 
-The guest has one virtio-net interface. `/init` gives it a static address;
-there is no DHCP client in the image.
+The guest has one Ethernet interface. By default it is configured with
+DHCP; static addresses come from the kernel command line.
 
 | Command line | Default | Meaning |
 |---|---|---|
-| `uniapp.ip=A.B.C.D/N` | `10.0.2.15/24` | address and prefix for the first NIC |
-| `uniapp.gw=A.B.C.D` | `10.0.2.2` | default route |
-| `uniapp.dns=A.B.C.D` | `10.0.2.3` | nameserver |
+| `uniapp.ip=A.B.C.D/N` | DHCP | address and prefix for the first NIC |
+| `uniapp.gw=A.B.C.D` | from DHCP | default route |
+| `uniapp.dns=A.B.C.D` | from DHCP | nameserver |
+| `ip=dhcp` | (Asterinas only) | run the kernel's DHCP client instead of the built-in `10.0.2.15/24` |
 
-The defaults match QEMU user-mode networking (`-netdev user`), where the
-guest is 10.0.2.15, the gateway 10.0.2.2 and the DNS forwarder 10.0.2.3.
+Under QEMU user-mode networking (`-netdev user`) DHCP yields 10.0.2.15,
+gateway 10.0.2.2 and the DNS forwarder 10.0.2.3; the `make run-*` targets
+rely on that. If DHCP fails, `/init` falls back to exactly those values.
 
 ## How the interface is configured
 
-On Linux `/init` uses the classic ioctls: `SIOCSIFADDR`, `SIOCSIFNETMASK`,
+On Linux `/init` runs a small DHCPv4 client over an `AF_PACKET` socket
+(DISCOVER, OFFER, REQUEST, ACK; five attempts with backoff), then applies
+the lease with the classic ioctls `SIOCSIFADDR`, `SIOCSIFNETMASK`,
 `SIOCSIFFLAGS` and `SIOCADDRT`. The interface name is discovered from
 `/sys/class/net`, falling back to `eth0`.
 
-Asterinas does not implement the set-ioctls (they return `ENOTTY`, logged as
-`Not a tty`); its network stack configures 10.0.2.15/24 with gateway 10.0.2.2
-at boot, in `kernel/core/src/net/iface/init.rs`. `/init` logs the failures and
-continues. If you need another address on Asterinas today, change that file
-and rebuild the kernel; command-line configuration is upstream work.
+Asterinas has no `AF_PACKET` sockets, so there the kernel does DHCP:
+`ip=dhcp` on the command line (the Linux `ip=` parameter) starts smoltcp's
+DHCPv4 client on `eth0` and publishes the lease in `/proc/net/dhcp` as
+`eth0 10.0.2.15/24 10.0.2.2 dns 10.0.2.3` (or `eth0 pending`). `/init` waits
+up to 30 s for that line and takes the nameserver from it; the address and
+route are already installed. Without `ip=dhcp` Asterinas keeps its compiled-in
+`10.0.2.15/24` via `10.0.2.2`, which `/init` may override with `uniapp.ip=`:
+the set-ioctls work since patch 0003. The log line tells you which path ran:
+`(kernel dhcp)`, `(dhcp)`, `(static)` or `(default)`.
 
 ## Name resolution
 

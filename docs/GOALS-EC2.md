@@ -1,7 +1,20 @@
 # Goal: an Asterinas AMI on EC2
 
-Status: proposed, 2026-10-08. Successor to M2; independent of the Hermit
-track (M3).
+Status: done, 2026-10-08 (branch `ec2`, merged). Successor to M2;
+independent of the Hermit track (M3).
+
+Measured on `ami-0ed0d83b98dbcdc77` (Asterinas, eu-central-1, t3.small),
+`scripts/smoke-ec2.sh` four runs out of four: `uniapp starting` visible via
+`GetConsoleOutput` 37 to 45 s after `running` (the guest reports BEAM up at
+4.4 s; the rest is firmware, GRUB and console lag), `eth0 172.31.x.x/20` via
+the kernel's DHCP client, TCP 4000 and TLS 1.3 4443 echo from the internet,
+`PROBE dns ok`, `PROBE tls ok`. `scripts/smoke-ec2-iex.sh`: `1 + 2` typed at
+the Serial Console answers `3`. The Linux-kernel variant passes the same
+checks (`uniapp starting` after 37 s). Deviations from the criteria below:
+publishing uses the EBS direct API instead of S3 + `import-snapshot` (no
+bucket, no `vmimport` role, 12 s); the 30 s console target is met by the
+guest but not by `GetConsoleOutput`'s latency; `beam.smp` RSS on EC2 was not
+measured (144 MB total RAM floor from the QEMU measurement stands).
 
 ## Vision
 

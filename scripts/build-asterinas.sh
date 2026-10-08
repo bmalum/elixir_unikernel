@@ -23,11 +23,19 @@ git -C "$SRC" fetch -q origin "$REF" 2>/dev/null || git -C "$SRC" fetch -q origi
 git -C "$SRC" checkout -q --detach "$REF" || git -C "$SRC" checkout -q --detach FETCH_HEAD
 echo "asterinas at $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
 # Local patches (see builder/asterinas-patches/*.patch for the rationale).
+# Start from the pristine checkout: drop local edits and leftover untracked
+# files (a stale new file makes `git apply` refuse the patch that adds it).
 git -C "$SRC" checkout -q -- .
+git -C "$SRC" clean -fdq -- kernel Cargo.toml Components.toml
 PATCHES=$(cd "$(dirname "$0")/../builder/asterinas-patches" && pwd)
 for p in "$PATCHES"/*.patch; do
   [ -f "$p" ] || continue
-  git -C "$SRC" apply "$p" && echo "applied $(basename "$p")"
+  if git -C "$SRC" apply "$p"; then
+    echo "applied $(basename "$p")"
+  else
+    echo "error: $(basename "$p") does not apply to asterinas $REF" >&2
+    exit 1
+  fi
 done
 DEV_IMAGE="asterinas/dev:$(cat "$SRC/DOCKER_IMAGE_VERSION")"
 echo "asterinas $REF, dev image $DEV_IMAGE"

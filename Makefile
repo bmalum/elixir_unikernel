@@ -27,7 +27,10 @@ ROOTFS       := $(BUILD)/rootfs
 INITRAMFS    := $(BUILD)/initramfs.cpio.gz
 KERNEL_M1    := $(BUILD)/asterinas/aster-nix-osdk-bin
 TLS_HOST     ?= www.erlang.org
-NET_ARGS     := uniapp.ip=10.0.2.15/24 uniapp.gw=10.0.2.2 uniapp.dns=10.0.2.3 uniapp.tls_host=$(TLS_HOST)
+# Both kernels obtain the address via DHCP from QEMU's user-mode network:
+# Linux through the client in /init, Asterinas through the in-kernel client
+# enabled by `ip=dhcp` (patch 0004). Pass uniapp.ip=/gw=/dns= for static setup.
+NET_ARGS     := uniapp.tls_host=$(TLS_HOST)
 
 # Host-side ports forwarded to the guest's echo servers (tcp 4000, udp 4001, tls 4443).
 # High numbers so a developer's local `iex -S mix` on 4000 never collides with the smoke test.
@@ -38,7 +41,8 @@ export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
 
 .DEFAULT_GOAL := help
 .PHONY: help check all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 \
-        asterinas run-m1 run-m1-app smoke-m1 smoke sizes dist docs docs-serve site clean
+        asterinas run-m1 run-m1-app smoke-m1 smoke sizes dist docs docs-serve site clean \
+        ami run-disk smoke-disk
 
 ## help:        list targets
 help:
@@ -94,6 +98,11 @@ QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu I
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 M0_CMDLINE = console=ttyS0 quiet loglevel=3 rdinit=/init $(NET_ARGS)
+## ec2-kernel:  build Linux 6.1 with ENA/NVMe/EFI for the Linux AMI  -> build/vmlinux-ec2
+ec2-kernel: $(BUILD)/vmlinux-ec2
+$(BUILD)/vmlinux-ec2: scripts/build-linux-ec2.sh $(BUILD)/vmlinux-m0
+	scripts/build-linux-ec2.sh $(BUILD)
+
 QEMU_M0 = $(QEMU_BASE) -smp $(QEMU_SMP) -m $(M0_MEM) -kernel $(BUILD)/vmlinux-m0 -initrd $(INITRAMFS)
 
 ## run-m0:      boot on Linux into IEx (exit QEMU: Ctrl-a x)
@@ -114,7 +123,7 @@ asterinas: $(KERNEL_M1)
 $(KERNEL_M1): scripts/build-asterinas.sh $(wildcard builder/asterinas-patches/*.patch) | $(INITRAMFS)
 	scripts/build-asterinas.sh $(ASTERINAS_REF) $(abspath $(INITRAMFS)) $(abspath $(BUILD))
 
-M1_CMDLINE = console=ttyS0 earlycon loglevel=error $(NET_ARGS)
+M1_CMDLINE = console=ttyS0 earlycon loglevel=error ip=dhcp $(NET_ARGS)
 QEMU_M1 = $(QEMU_BASE) -smp $(M1_SMP) -m $(M1_MEM) -kernel $(KERNEL_M1) -initrd $(INITRAMFS)
 
 ## run-m1:      boot on Asterinas into IEx (exit QEMU: Ctrl-a x)
@@ -128,6 +137,68 @@ run-m1-app: asterinas
 ## smoke-m1:    automated assertions on Asterinas
 smoke-m1: asterinas
 	scripts/smoke.sh m1 "$(QEMU_M1)" "$(M1_CMDLINE)"
+
+# ---------------------------------------------------------------- disk image (EC2 / UEFI)
+# KERNEL=asterinas (default) or KERNEL=linux (reference kernel with ENA+NVMe).
+KERNEL      ?= asterinas
+# DISK_MODE=app|iex is baked into the image (an EC2 instance has no -append).
+DISK_MODE   ?= app
+DISK        := $(BUILD)/disk-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),).raw
+OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp
+DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
+DISK_KERNEL_asterinas  = $(KERNEL_M1)
+DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
+
+## ami:         UEFI/GPT disk image with GRUB, kernel and initramfs -> build/disk-<KERNEL>.raw
+ami: $(DISK)
+$(DISK): $(INITRAMFS) $(DISK_KERNEL_$(KERNEL)) scripts/mkdisk.sh
+	DISK_MB=1024 ESP_MB=94 KERNEL_KIND=$(KERNEL) scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $@ "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS) uniapp.mode=$(DISK_MODE)"
+
+# A copy is booted so QEMU's firmware never writes into the artefact.
+# GRUB needs room for kernel + initramfs + the multiboot2 copy below the kernel's
+# 128 MB load address: "error: out of memory" at 160M, fine at 256M. EC2's smallest
+# instances have 512 MB+ anyway.
+DISK_MEM    ?= 256M
+# Asterinas log level baked into the disk image. `info` logs every syscall and
+# overflows the 64 KB EC2 console buffer within seconds; keep `error` for images.
+DISK_LOGLEVEL ?= error
+QEMU_DISK = $(QEMU_BASE) -smp $(M1_SMP) -m $(DISK_MEM) \
+  -drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
+  -drive if=none,id=d0,format=raw,file=$(BUILD)/disk-boot.raw -device nvme,drive=d0,serial=eu0001
+
+## run-disk:    boot the disk image in QEMU (UEFI + NVMe), app mode
+run-disk: $(DISK)
+	@test -n "$(OVMF)" || { echo "OVMF firmware not found; set OVMF=/path/to/edk2-x86_64-code.fd"; exit 1; }
+	cp $(DISK) $(BUILD)/disk-boot.raw
+	$(QEMU_DISK)
+
+## smoke-disk:  smoke test of the disk image (UEFI + NVMe); mode is baked into the image, so
+##              the script rebuilds it per mode
+smoke-disk: $(INITRAMFS) $(DISK_KERNEL_$(KERNEL))
+	@test -n "$(OVMF)" || { echo "OVMF firmware not found; set OVMF=..."; exit 1; }
+	KERNEL_KIND=$(KERNEL) SMOKE_DISK=1 scripts/smoke.sh disk-$(KERNEL) "$(QEMU_DISK)" "$(DISK_CMDLINE_$(KERNEL)) $(NET_ARGS)" \
+	  "scripts/mkdisk.sh $(DISK_KERNEL_$(KERNEL)) $(INITRAMFS) $(BUILD)/disk-boot.raw"
+
+# EC2. Credentials and region come from the environment (AWS_PROFILE, AWS_REGION).
+AMI_NAME = elixir_unikernel-$(VERSION)-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),)
+## ami-publish: upload build/disk-$(KERNEL).raw as an AMI (EBS direct API, ~15 s); prints the id
+ami-publish: $(DISK)
+	scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)
+
+## smoke-ec2:   publish (or reuse) the AMI, boot a t3.small, run the assertions, terminate
+smoke-ec2: $(DISK)
+	scripts/smoke-ec2.sh $$(scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)) $(KERNEL)
+
+## ami-clean:   deregister this version's AMIs (all kernels and modes) and delete their snapshots
+ami-clean:
+	@for ami in $$(aws ec2 describe-images --owners self --filters "Name=name,Values=elixir_unikernel-$(VERSION)-*" --query 'Images[].ImageId' --output text); do \
+	  snaps=$$(aws ec2 describe-images --image-ids $$ami --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text); \
+	  aws ec2 deregister-image --image-id $$ami >/dev/null && echo "deregistered $$ami"; \
+	  for s in $$snaps; do aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s"; done; \
+	done; \
+	left=$$(aws ec2 describe-instances --filters Name=tag:Project,Values=elixir_unikernel Name=instance-state-name,Values=pending,running,stopping,stopped --query 'Reservations[].Instances[].InstanceId' --output text); \
+	[ -z "$$left" ] && echo "no live instances tagged Project=elixir_unikernel" || echo "WARNING: live instances: $$left"
 
 # ---------------------------------------------------------------- dist, docs, misc
 ## sizes:       print image sizes against the 40 MB budget

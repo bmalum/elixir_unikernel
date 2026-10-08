@@ -9,12 +9,23 @@
 # Prints boot timing. Exit code != 0 on any failure.
 set -uo pipefail
 trap '' PIPE   # writing Ctrl-a x into the FIFO of an already-dead QEMU must not kill us
-LABEL=$1; QEMU_CMD=$2; CMDLINE=$3
+LABEL=$1; QEMU_CMD=$2; CMDLINE=$3; MKDISK=${4:-}
+# Two ways to pass the kernel command line: -append (direct kernel boot), or,
+# when a 4th argument "mkdisk command" is given, rebuild the disk image with the
+# command line baked into GRUB before each run (UEFI disk boot).
+start_qemu() { # <mode> <fifo> <log>
+  if [ -n "$MKDISK" ]; then
+    $MKDISK "$CMDLINE uniapp.mode=$1" >/dev/null 2>&1 || { echo "mkdisk failed" >&2; return 1; }
+    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD < "$2" > "$3" 2>&1 &
+  else
+    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=$1" < "$2" > "$3" 2>&1 &
+  fi
+}
 TIMEOUT=${SMOKE_TIMEOUT:-240}
 # Asterinas under QEMU TCG occasionally stalls right after exec'ing beam.smp
 # (upstream kernel too, see RESEARCH.md). A boot that has not printed
 # "uniapp starting" within BOOT_TIMEOUT is killed and retried, up to ATTEMPTS.
-BOOT_TIMEOUT=${SMOKE_BOOT_TIMEOUT:-45}
+BOOT_TIMEOUT=${SMOKE_BOOT_TIMEOUT:-60}
 ATTEMPTS=${SMOKE_ATTEMPTS:-5}
 LOGDIR=${SMOKE_LOGDIR:-build/logs}; mkdir -p "$LOGDIR"
 TIMEOUT_BIN=timeout; command -v timeout >/dev/null || TIMEOUT_BIN=gtimeout
@@ -40,8 +51,7 @@ run_vm() {
   for attempt in $(seq 1 "$ATTEMPTS"); do
     fifo=$(mktemp -u); holder=$(fifo_open "$fifo")
     : > "$log"
-    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=$mode" < "$fifo" > "$log" 2>&1 &
-    qpid=$!
+    start_qemu "$mode" "$fifo" "$log"; qpid=$!
     typed=0; t=0; booted=0; done_=0
     while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
       sleep 1; t=$((t+1))
@@ -98,8 +108,7 @@ run_vm_app() {
   for attempt in $(seq 1 "$ATTEMPTS"); do
     fifo=$(mktemp -u); holder=$(fifo_open "$fifo")
     : > "$log"
-    $TIMEOUT_BIN "$TIMEOUT" $QEMU_CMD -append "$CMDLINE uniapp.mode=app" < "$fifo" > "$log" 2>&1 &
-    qpid=$!
+    start_qemu app "$fifo" "$log"; qpid=$!
     t=0; booted=0; done_=0
     while kill -0 $qpid 2>/dev/null && [ $t -lt "$TIMEOUT" ]; do
       sleep 1; t=$((t+1))

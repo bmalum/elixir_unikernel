@@ -22,8 +22,9 @@ Pure-BEAM dependencies only.
 **Can I use NIFs?** Only if they are linked statically into `beam.smp`, the
 way `crypto` is. Runtime `dlopen` is not possible.
 
-**Does it do DHCP?** No. The address comes from the kernel command line
-(`uniapp.ip=`), and on Asterinas it is currently compiled into the kernel.
+**Does it do DHCP?** Yes, by default. On Linux `/init` has a client; on
+Asterinas the kernel has one (`ip=dhcp`, patch 0004). `uniapp.ip=` sets a
+static address instead. See the networking chapter.
 
 **Can two images talk over Erlang distribution?** Not yet: there is no
 `epmd`, and distribution is a non-goal of the MVP. `-proto_dist` with a

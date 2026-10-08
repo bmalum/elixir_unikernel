@@ -15,6 +15,12 @@
 | `run-m1`, `run-m1-app` | | boot on Asterinas into IEx / the app |
 | `smoke-m0`, `smoke-m1` | `build/logs/` | automated assertions |
 | `smoke` | | `smoke-m0 smoke-m1 sizes` |
+| `ec2-kernel` | `build/vmlinux-ec2` | Linux 6.1 with ENA, NVMe and EFI stub for the Linux AMI |
+| `ami` | `build/disk-<KERNEL>[-iex].raw` | 1 GiB GPT disk with an EFI partition: GRUB, kernel, initramfs, command line |
+| `run-disk`, `smoke-disk` | | boot / test the disk under OVMF with an NVMe root |
+| `ami-publish` | an AMI id | EBS direct upload and `register-image` (UEFI, ENA); idempotent by name |
+| `smoke-ec2` | `build/logs/ec2-*.log` | publish, launch a `t3.small`, assert, terminate |
+| `ami-clean` | | deregister this version's AMIs and delete their snapshots |
 | `sizes` | | image sizes against the 40 MB budget |
 | `dist` | `dist/` | versioned bundle with checksums |
 | `docs`, `docs-serve` | `build/book/` | the manual via mdBook in Docker |
@@ -36,7 +42,14 @@
 | `QEMU_SMP`, `M1_SMP` | 2, 2 | vCPUs |
 | `TLS_HOST` | `www.erlang.org` | DNS and TLS probe target |
 | `HOST_PORT_TCP/UDP/TLS` | 14000/14001/14443 | host side of the port forwards |
-| `SMOKE_TIMEOUT`, `SMOKE_BOOT_TIMEOUT`, `SMOKE_ATTEMPTS` | 240, 45, 5 | smoke test timing (environment variables) |
+| `SMOKE_TIMEOUT`, `SMOKE_BOOT_TIMEOUT`, `SMOKE_ATTEMPTS` | 240, 60, 5 | smoke test timing (environment variables) |
+| `KERNEL` | `asterinas` | kernel for `ami`, `run-disk`, `smoke-disk`, `ami-publish`, `smoke-ec2` (`asterinas` or `linux`) |
+| `DISK_MODE` | `app` | `uniapp.mode` baked into the disk image (`app` or `iex`) |
+| `DISK_LOGLEVEL` | `error` | Asterinas log level baked into the disk image |
+| `DISK_MEM` | `256M` | guest RAM for the OVMF boot (GRUB needs more than the kernels) |
+| `OVMF` | auto-detected | path to `edk2-x86_64-code.fd` |
+| `AMI_FLAGS` | | extra flags for `ami-publish`, e.g. `--force` |
+| `AWS_PROFILE`, `AWS_REGION` | from the environment | credentials and region for the EC2 targets |
 
 ## Files
 
@@ -49,4 +62,4 @@
 | `builder/asterinas-patches/` | kernel patches applied before building Asterinas |
 | `init/init.c` | PID 1 |
 | `app/` | the sample release |
-| `scripts/` | rootfs assembly, initramfs, kernel fetch/build, smoke test, dist |
+| `scripts/` | rootfs assembly, initramfs, kernel fetch/build, smoke test, dist, disk image, EC2 publish and smoke |
