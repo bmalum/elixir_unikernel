@@ -96,7 +96,8 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   EXTRA+=(--user-data "uniapp.cloudwatch=1
 uniapp.log_group=/elixir_unikernel/smoke
 uniapp.data=auto
-uniapp.halt_after_first_boot=75000")
+uniapp.halt_after_first_boot=75000${ENA_USERDATA:+
+$ENA_USERDATA}")
   echo "data volume from $DATA_SNAPSHOT, role $ROLE, user data with uniapp.cloudwatch=1"
 fi
 
@@ -172,9 +173,30 @@ while got < n * len(line):
 th.join(); dt = time.time() - t0; s.close()
 print("BULK %d bytes in %.0f ms = %.1f MB/s" % (got, dt*1000, got/dt/1e6))
 PY
-)
-echo "$bulk" | grep -q '^BULK' && ok "$bulk (round trip from $MYIP)" || bad "bulk transfer: $bulk"
+) || true
+echo "$bulk" | grep -q '^BULK' && ok "$(echo "$bulk" | grep '^BULK') (round trip from $MYIP)" || bad "bulk transfer: $(echo "$bulk" | grep -vE '^\s|^Traceback|^Exception' | tail -2 | tr '\n' ' ')"
 grep -qiE 'crash dump|Kernel panic|panicked at' "$LOG" && bad "crash in console" || ok "no crash"
+
+if [ -n "${QUICK:-}" ]; then
+  # QUICK=1: stop after the network checks, wait for the test reset, then re-check TCP.
+  sleep 50; console > "$LOG"
+  grep -q 'ena: reset done' "$LOG" && ok "ENA device reset exercised: $(grep -m1 -oE 'reset done in [0-9]+ ms.*' "$LOG")" || bad "no 'ena: reset done'"
+  r=$(python3 - "$IP" <<'PY' 2>&1
+import socket, sys
+try:
+    s = socket.create_connection((sys.argv[1], 4000), 5); s.sendall(b"hello\n"); print("TCP", s.recv(100) == b"hello\n"); s.close()
+except Exception as e: print("TCP False", e)
+PY
+)
+  if [ "$r" = "TCP True" ]; then ok "TCP echo after the reset (data path recovered in place)"; else
+    sleep 20; console > "$LOG"
+    if grep -q 'data path dead after reset' "$LOG" && [ "$(grep -c 'running /init' "$LOG")" -ge 2 ]; then
+      ok "data path did not recover; driver rebooted the machine and the second boot is up ($(grep -m1 'data path dead' "$LOG" | cut -c15-110))"
+    else bad "TCP echo after the reset: $r; no recovery reboot either"; fi
+  fi
+  echo "SMOKE $LABEL quick ($AMI): $PASS passed, $FAIL failed"
+  exit $(( FAIL > 0 ))
+fi
 
 if [ -n "${DATA_SNAPSHOT:-}" ]; then
   grep -qE '^\[init\] imds: i-' "$LOG" && ok "$(grep -m1 '^\[init\] imds: i-' "$LOG" | sed 's/^\[init\] //')" || bad "no IMDS identity line"
@@ -183,6 +205,10 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   grep -q 'data: .* mounted on /data' "$LOG" && ok "$(grep -m1 'mounted on /data' "$LOG" | sed 's/^\[init\] //')" || bad "data volume not mounted: $(grep -m1 'data:' "$LOG" || echo missing)"
   grep -q '^DATA boot_count 1 ' "$LOG" && ok "boot_count 1 on /data" || bad "boot counter: $(grep -m1 '^DATA' "$LOG" || echo missing)"
   grep -q '^CLOUDWATCH ' "$LOG" && ok "$(grep -m1 '^CLOUDWATCH' "$LOG")" || bad "CloudWatch shipper not started"
+  grep -qE 'ena: .* ready, [0-9]+ queue pairs?' "$LOG" && ok "$(grep -m1 -oE 'ena: .* ready, .*' "$LOG")" || bad "no ENA ready line"
+  # ena.test_reset=40 (user data): the driver resets the device 40 s after init;
+  # the data volume boot that follows at +75 s proves the NIC still works afterwards.
+  grep -q 'no keep-alive' "$LOG" && bad "keep-alive watchdog fired: $(grep -m1 'no keep-alive' "$LOG")" || ok "keep-alive watchdog quiet (AENQ keep-alives arriving)"
 
   # The VM exits (uniapp.eval above), /init reboots the machine, the second boot
   # must find the data volume with boot_count 1 and bump it.

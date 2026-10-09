@@ -147,7 +147,9 @@ DISK_MODE   ?= app
 DISK        := $(BUILD)/disk-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
 # uniapp.imds=1: read user data and identity from the instance metadata service.
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp uniapp.imds=1
+# ENA_ARGS: driver knobs for experiments, e.g. "ena.queues=1 ena.offload=0 ena.aenq_irq=0".
+ENA_ARGS ?=
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp uniapp.imds=1 $(ENA_ARGS)
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init uniapp.imds=1
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
