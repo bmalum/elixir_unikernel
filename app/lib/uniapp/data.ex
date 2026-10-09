@@ -28,11 +28,15 @@ defmodule Uniapp.Data do
           end
 
         count = count + 1
+        :persistent_term.put({__MODULE__, :boot_count}, count)
         write_sync(path, Integer.to_string(count) <> "\n")
         IO.puts("DATA boot_count #{count} #{dir}")
         count
     end
   end
+
+  @doc "The boot counter as bumped at start-up, or nil without a data volume."
+  def boot_count, do: :persistent_term.get({__MODULE__, :boot_count}, nil)
 
   @doc "Writes `content` to `path` and syncs it to the device."
   def write_sync(path, content) do

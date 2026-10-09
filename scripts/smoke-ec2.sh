@@ -64,8 +64,9 @@ SG=$(aws ec2 create-security-group --group-name "elixir_unikernel-smoke-$LABEL-$
       --vpc-id "$VPC" --tag-specifications "ResourceType=security-group,Tags=[$TAGS]" --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
   "IpProtocol=tcp,FromPort=4000,ToPort=4000,IpRanges=[{CidrIp=$CLIENT_CIDR}]" \
-  "IpProtocol=tcp,FromPort=4443,ToPort=4443,IpRanges=[{CidrIp=$CLIENT_CIDR}]" >/dev/null
-echo "security group $SG (4000, 4443 from $CLIENT_CIDR)"
+  "IpProtocol=tcp,FromPort=4443,ToPort=4443,IpRanges=[{CidrIp=$CLIENT_CIDR}]" \
+  "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=$CLIENT_CIDR}]" >/dev/null
+echo "security group $SG (4000, 4443, 8080 from $CLIENT_CIDR)"
 
 # IAM role + instance profile for CloudWatch (idempotent; kept between runs, tagged).
 ensure_role() {
@@ -137,6 +138,13 @@ done
 tls=$( (echo "tls-hello"; sleep 2) | timeout 20 openssl s_client -connect "$IP:4443" -tls1_3 -quiet 2>/dev/null | head -1 || true)
 [ "$tls" = "tls-hello" ] && ok "internet -> instance TLS 1.3 4443 echo" || bad "TLS echo: '$tls'"
 
+# Health endpoint: what an ALB target group or ASG health check would call.
+hz=$(curl -s --max-time 10 -w '\n%{http_code}' "http://$IP:8080/healthz" 2>/dev/null || true)
+hz_code=$(echo "$hz" | tail -1); hz_body=$(echo "$hz" | sed '$d')
+[ "$hz_code" = 200 ] && echo "$hz_body" | grep -q '"status":"ok"' && ok "GET /healthz -> 200 $(echo "$hz_body" | cut -c1-120)" || bad "GET /healthz -> '$hz_code' $hz_body"
+lz=$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' "http://$IP:8080/livez" 2>/dev/null || true)
+[ "$lz" = 200 ] && ok "GET /livez -> 200" || bad "GET /livez -> '$lz'"
+
 # Probes need the DNS/TLS round trip to the internet; give the console time to catch up.
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   console > "$LOG"
@@ -144,6 +152,28 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 grep -q 'PROBE dns ok' "$LOG" && ok "PROBE dns ok" || bad "PROBE dns: $(grep -m1 'PROBE dns' "$LOG" || echo missing)"
 grep -q 'PROBE tls ok' "$LOG" && ok "PROBE tls ok" || bad "PROBE tls: $(grep -m1 'PROBE tls' "$LOG" || echo missing)"
+for _ in 1 2 3 4 5 6; do grep -q '^BENCH tcp_echo' "$LOG" && break; sleep 10; console > "$LOG"; done
+grep -q '^BENCH tcp_echo' "$LOG" && ok "$(grep -m1 '^BENCH tcp_echo' "$LOG") (guest-side echo through the NIC driver)" || bad "no BENCH line"
+
+# Bulk transfer from here: 4 MB of 1 KiB lines through the TCP echo, MB/s round trip.
+bulk=$(python3 - "$IP" <<'PY' 2>&1
+import socket, sys, time, threading
+host = sys.argv[1]; line = b"y" * 1023 + b"\n"; n = 4096
+s = socket.create_connection((host, 4000), 10); s.settimeout(20)
+t0 = time.time()
+def send():
+    for _ in range(n): s.sendall(line)
+th = threading.Thread(target=send); th.start()
+got = 0
+while got < n * len(line):
+    d = s.recv(1 << 16)
+    if not d: break
+    got += len(d)
+th.join(); dt = time.time() - t0; s.close()
+print("BULK %d bytes in %.0f ms = %.1f MB/s" % (got, dt*1000, got/dt/1e6))
+PY
+)
+echo "$bulk" | grep -q '^BULK' && ok "$bulk (round trip from $MYIP)" || bad "bulk transfer: $bulk"
 grep -qiE 'crash dump|Kernel panic|panicked at' "$LOG" && bad "crash in console" || ok "no crash"
 
 if [ -n "${DATA_SNAPSHOT:-}" ]; then

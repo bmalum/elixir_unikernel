@@ -20,7 +20,13 @@ defmodule Uniapp.Probe do
     end
 
     IO.puts("PROBE done")
+    # Throughput self-test through the echo server, printed as BENCH for the smoke test.
+    wait_ready(50)
+    Uniapp.Health.bench()
   end
+
+  defp wait_ready(0), do: :ok
+  defp wait_ready(n), do: if(Uniapp.Health.ready?(), do: :ok, else: (Process.sleep(100); wait_ready(n - 1)))
 
   defp report(name, fun) do
     # Run each probe in its own unlinked process so a crash only fails that probe.

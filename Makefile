@@ -37,7 +37,8 @@ NET_ARGS     := uniapp.tls_host=$(TLS_HOST)
 HOST_PORT_TCP ?= 14000
 HOST_PORT_UDP ?= 14001
 HOST_PORT_TLS ?= 14443
-export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
+HOST_PORT_HTTP ?= 18088
+export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS HOST_PORT_HTTP
 
 .DEFAULT_GOAL := help
 .PHONY: help check all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 \
@@ -92,7 +93,7 @@ $(BUILD)/vmlinux-m0:
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
   -nographic -no-reboot \
-  -netdev user,id=n0,hostfwd=tcp::$(HOST_PORT_TCP)-:4000,hostfwd=udp::$(HOST_PORT_UDP)-:4001,hostfwd=tcp::$(HOST_PORT_TLS)-:4443 \
+  -netdev user,id=n0,hostfwd=tcp::$(HOST_PORT_TCP)-:4000,hostfwd=udp::$(HOST_PORT_UDP)-:4001,hostfwd=tcp::$(HOST_PORT_TLS)-:4443,hostfwd=tcp::$(HOST_PORT_HTTP)-:8080 \
   -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off \
   -device virtio-rng-pci,disable-legacy=on,disable-modern=off \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
