@@ -9,14 +9,19 @@ defmodule Uniapp.Application do
       "uniapp starting (otp #{System.otp_release()}, elixir #{System.version()}, uptime #{uptime()}s)"
     )
 
+    boot_count = Uniapp.Data.bump_boot_counter()
+
     children = [
+      Uniapp.Cloudwatch,
       Supervisor.child_spec({Uniapp.Echo, kind: :tcp, port: echo_port()}, id: :echo_tcp),
       Supervisor.child_spec({Uniapp.Echo, kind: :udp, port: echo_port() + 1}, id: :echo_udp),
       Supervisor.child_spec({Uniapp.Echo, kind: :tls, port: 4443}, id: :echo_tls),
       Uniapp.Probe
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Uniapp.Supervisor)
+    result = Supervisor.start_link(children, strategy: :one_for_one, name: Uniapp.Supervisor)
+    if boot_count, do: Uniapp.Cloudwatch.metric("BootCount", boot_count)
+    result
   end
 
   # Seconds since kernel boot, if the kernel exposes /proc/uptime.

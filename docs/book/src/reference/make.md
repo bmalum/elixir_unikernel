@@ -18,8 +18,9 @@
 | `ec2-kernel` | `build/vmlinux-ec2` | Linux 6.1 with ENA, NVMe and EFI stub for the Linux AMI |
 | `ami` | `build/disk-<KERNEL>[-iex].raw` | 1 GiB GPT disk with an EFI partition: GRUB, kernel, initramfs, command line |
 | `run-disk`, `smoke-disk` | | boot / test the disk under OVMF with an NVMe root |
+| `data` | `build/data.raw` | empty 64 MB ext2 data volume image (`scripts/mkdata.sh`) |
 | `ami-publish` | an AMI id | EBS direct upload and `register-image` (UEFI, ENA); idempotent by name |
-| `smoke-ec2` | `build/logs/ec2-*.log` | publish, launch a `t3.small`, assert, terminate |
+| `smoke-ec2` | `build/logs/ec2-*.log` | publish AMI and data snapshot, launch a `t3.small` with data volume and IAM role, 18 assertions incl. reboot and CloudWatch, terminate |
 | `ami-clean` | | deregister this version's AMIs and delete their snapshots |
 | `sizes` | | image sizes against the 40 MB budget |
 | `dist` | `dist/` | versioned bundle with checksums |

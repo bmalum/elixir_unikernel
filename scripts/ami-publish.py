@@ -105,6 +105,9 @@ def main():
     ap.add_argument("--version", required=True)
     ap.add_argument("--kernel", required=True, choices=["linux", "asterinas"])
     ap.add_argument("--force", action="store_true", help="replace an existing AMI of the same name")
+    ap.add_argument("--snapshot-only", action="store_true",
+                    help="upload the image as a plain EBS snapshot (e.g. a data volume) and print its id; "
+                         "reuses a completed snapshot tagged with the same Name")
     a = ap.parse_args()
 
     ec2 = boto3.client("ec2")
@@ -115,6 +118,20 @@ def main():
         {"Key": "Kernel", "Value": a.kernel},
         {"Key": "Name", "Value": a.name},
     ]
+
+    if a.snapshot_only:
+        r = ec2.describe_snapshots(OwnerIds=["self"], Filters=[
+            {"Name": "tag:Name", "Values": [a.name]}, {"Name": "status", "Values": ["completed"]}])
+        if r["Snapshots"] and not a.force:
+            log(f"reusing snapshot {r['Snapshots'][0]['SnapshotId']} ({a.name})")
+            print(r["Snapshots"][0]["SnapshotId"])
+            return
+        for old in r["Snapshots"]:
+            ec2.delete_snapshot(SnapshotId=old["SnapshotId"])
+            log(f"deleted {old['SnapshotId']}")
+        snap = upload_snapshot(ebs, ec2, a.image, a.name, tags)
+        print(snap)
+        return
 
     existing = find_image(ec2, a.name)
     if existing and not a.force:

@@ -14,7 +14,7 @@ defmodule Uniapp.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto, :ssl, :public_key, :iex],
+      extra_applications: [:logger, :crypto, :ssl, :public_key, :inets, :iex],
       mod: {Uniapp.Application, []}
     ]
   end

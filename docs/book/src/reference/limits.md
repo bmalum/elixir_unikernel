@@ -39,7 +39,8 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
   just nothing to execute.
 - NIFs loaded at runtime: no `dlopen`. OTP's `crypto` and `asn1` are linked
   statically.
-- Persistent storage: the initramfs is read-only; `/tmp` is RAM.
+- Persistent storage: the initramfs is read-only; `/tmp` is RAM. A data
+  volume can be mounted at `/data` (ext2, `uniapp.data=`).
 - Hot code upgrades: no writable release directory (and `-mode interactive`
   loads from the read-only tree anyway).
 - Terminfo: `TERM=dumb`, no colours in IEx.
@@ -47,10 +48,10 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
   by the kernel client on Asterinas; `/init` on Linux does not renew).
 - EC2: x86-64 Nitro instances with ENA only (tested on t3.small); one Rx/Tx
   queue pair without offloads, so throughput is a fraction of what the
-  instance allows. No EBS data volumes on Asterinas (its NVMe driver fails
-  on Nitro); no instance metadata, no IPv6.
-- Clean power-off from the guest: stopping the node leaves the kernel without
-  an init process; QEMU keeps running.
+  instance allows. One NVMe I/O queue. No IPv6. ACPI power events from the
+  EC2 API are ignored (guest-initiated reboots work).
+- Power-off: there is no ACPI S5 without AML, so `poweroff` resets the
+  machine instead (QEMU exits through `isa-debug-exit`).
 - Asterinas only: interface configuration from the command line (the address
   is compiled into the kernel), binding a socket to `0.0.0.0` and reaching it
   over loopback, hardware other than virtio.

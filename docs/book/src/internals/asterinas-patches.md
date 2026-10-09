@@ -168,6 +168,51 @@ fail to apply, so the image on EC2 lacked both DHCP and ENA.
 `scripts/build-asterinas.sh` now cleans the tree and aborts when a patch
 does not apply.
 
+## 0006: power-off fallback and `clock_settime`
+
+Two unrelated small changes, both needed to run unattended on EC2.
+
+Restart: `sys_reboot` existed, and `kernel/core/src/arch/x86/power.rs`
+already tried the ACPI reset register and then the i8042 controller. On
+Nitro neither exists (no reset register in the FADT, no keyboard
+controller), so `reboot(2)` fell through to `machine_halt` and the instance
+sat there. The patch adds `ostd::arch::triple_fault` (load an empty IDT,
+`int3`) as the last resort Linux uses too, and installs the same chain as
+the power-off handler, because without ACPI AML there is no S5: a guest that
+asks to power off reboots instead of hanging with a dead console. Under QEMU
+OSTD installs its `isa-debug-exit` handler first, so tests still exit.
+
+Wall clock: there was no `clock_settime`/`settimeofday`; the realtime clock
+was boot time (from the RTC) plus the monotonic counter. The patch keeps
+that and adds an atomic offset that `set_realtime` stores and all realtime
+readers (the `CLOCK_REALTIME*` clocks and the vDSO bases) apply. Monotonic
+clocks are untouched, as on Linux. `CAP_SYS_TIME` is required. Verified
+with a 40-line C program: after `clock_settime(2000000000)`,
+`clock_gettime`, `gettimeofday` (vDSO), `CLOCK_REALTIME_COARSE` and
+`time()` all report it and `CLOCK_MONOTONIC` is unchanged. On Nitro the
+firmware clock has been 0.4 to 2.7 s off at boot; `/init` corrects it with
+SNTP from Amazon Time Sync.
+
+## 0007: NVMe on EBS
+
+Symptom: `nvme: Device initialization error: Err(CommandFailed)` on every
+Nitro instance, after `Create I/O Completion Queue` (the third admin
+command). The driver worked under QEMU.
+
+Cause: the EBS controller advertises `CAP.MQES = 31` (32 queue entries);
+the driver asked for 64, the controller answered "Invalid Field in Command"
+(status `0x4205`, SC `0x02`). QEMU's model allows 2048. The driver also never
+issued `Set Features (Number of Queues)`, which the spec requires before
+creating I/O queues; EBS tolerates that, but the patch adds it since Linux
+does it and other controllers enforce it.
+
+Fix: read `CAP.MQES`, cap the I/O queue size at it, give each ring a
+`depth` field so head/tail/phase wrap at the negotiated size while the
+storage stays `QUEUE_DEPTH`, and log `CAP` plus any rejected admin command
+through `early_println!` so the next controller quirk is visible at
+`loglevel=error`. Result: `/dev/nvme1n1` (a data volume on `/dev/sdf`)
+mounts as ext2 on a t3.small and the boot counter survives a reboot.
+
 ## Reporting upstream
 
 The patches are `git diff` output against `3d85cb4`, apply in order with

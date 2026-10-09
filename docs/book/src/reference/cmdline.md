@@ -14,6 +14,17 @@ quotes if they contain spaces; a value cannot itself contain a double quote.
 | `uniapp.tls_host=HOST` | unset | sample app only: enables the DNS and TLS 1.3 client probes against `HOST:443` |
 | `uniapp.emu="FLAGS"` | unset | extra `beam.smp` emulator flags, space separated. Note that `erl +X` is spelled `-X` here (`erlexec` does the translation normally), e.g. `uniapp.emu="-S 1 -sbwt none"` |
 | `uniapp.eval="EXPR."` | unset | an Erlang expression passed as `-eval`, run during boot. Debugging aid |
+| `uniapp.on_exit=reboot\|poweroff\|halt` | `reboot` | what `/init` does when `beam.smp` exits. `reboot` re-runs the image (what an auto-scaling group wants from a crashed node); under QEMU with `-no-reboot` it ends the VM |
+| `uniapp.imds=1` | unset | EC2: query IMDSv2 for identity (`EC2_INSTANCE_ID`, `AWS_REGION`, ... in the environment) and user data. User-data lines `key=value` override command-line keys; the raw user data is in `/run/user-data` |
+| `uniapp.ntp=A.B.C.D\|off` | Amazon Time Sync when `imds=1`, else off | SNTP server; the clock is set at boot and resynced hourly |
+| `uniapp.data=auto\|/dev/X\|off` | unset | mount an ext2 data volume read-write at `/data` (`auto`: the first block device that mounts); exports `UNIAPP_DATA=/data`, crash dumps go to `/data/erl_crash.dump` |
+| `uniapp.cloudwatch=1` | unset | sample app: ship the log to CloudWatch Logs and publish EMF metrics using the instance role (needs `imds=1`) |
+| `uniapp.log_group=NAME` | `/elixir_unikernel` | CloudWatch log group; the stream is the instance id |
+| `uniapp.metric_namespace=NAME` | `elixir_unikernel` | CloudWatch namespace for `BootCount`, `Uptime`, `MemoryTotal`, `ProcessCount` |
+
+Keys from EC2 user data are read before the kernel's own line, so
+`uniapp.mode=iex` in user data turns an `app` image into an IEx one without
+rebuilding the AMI.
 
 Kernel-side keys that matter:
 

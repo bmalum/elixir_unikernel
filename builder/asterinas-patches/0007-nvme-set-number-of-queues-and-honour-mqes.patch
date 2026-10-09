@@ -1,0 +1,319 @@
+diff --git a/kernel/core/comps/nvme/src/device/block_device.rs b/kernel/core/comps/nvme/src/device/block_device.rs
+index 817118e0..2a5f4945 100644
+--- a/kernel/core/comps/nvme/src/device/block_device.rs
++++ b/kernel/core/comps/nvme/src/device/block_device.rs
+@@ -225,6 +225,14 @@ impl NvmeDeviceInner {
+         let cap = transport.regs().read64(NvmeRegs64::Cap);
+ 
+         let dstrd = ((cap >> NvmeRegs64::CAP_DSTRD_SHIFT) & NvmeRegs64::CAP_DSTRD_MASK) as u16;
++        let mqes = (cap & NvmeRegs64::CAP_MQES_MASK) as u16;
++        // I/O queue size (0-based) is capped at CAP.MQES: the EBS controller on
++        // EC2 reports 31 and rejects larger queues with "Invalid Field".
++        let io_queue_size = ((QUEUE_DEPTH - 1) as u16).min(mqes);
++        info!("CAP = {:#x}: MQES {}, I/O queue size {}, DSTRD {}", cap, mqes, io_queue_size + 1, dstrd);
++        if io_queue_size < 1 {
++            return Err(NvmeDeviceError::CommandFailed);
++        }
+ 
+         let cap_mpsmin =
+             ((cap >> NvmeRegs64::CAP_MPSMIN_SHIFT) & NvmeRegs64::CAP_MPSMIN_MASK) as u32;
+@@ -247,7 +255,7 @@ impl NvmeDeviceInner {
+         let controller_ready_timeout = Duration::from_millis(timeout_millis);
+ 
+         let mut init_ctx =
+-            InitContext::new(transport, dstrd, cc_mps_value, controller_ready_timeout)?;
++            InitContext::new(transport, dstrd, io_queue_size, cc_mps_value, controller_ready_timeout)?;
+ 
+         // NVMe controller initialization sequence.
+         //
+@@ -258,6 +266,10 @@ impl NvmeDeviceInner {
+         //   4. Enable the controller by setting CC.EN to '1'
+         //   5. Wait for CSTS.RDY to become '1' (controller ready to process commands)
+         //   6. Configure MSI-X interrupts for the Admin Queue
++        for io_qid in 1..QUEUE_NUM {
++            init_ctx.submission_queues[io_qid].set_depth(io_queue_size + 1);
++            init_ctx.completion_queues[io_qid].set_depth(io_queue_size + 1);
++        }
+         init_ctx.reset_controller()?;
+         init_ctx.configure_admin_queue();
+         init_ctx.set_entry_size();
+@@ -272,6 +284,7 @@ impl NvmeDeviceInner {
+         // TODO: Support exposing multiple namespaces per controller instead of only the first one.
+         let namespace = init_ctx.identify_ns(nsids[0])?;
+ 
++        init_ctx.set_number_of_queues()?;
+         let io_msix_vectors = init_ctx.create_io_queues()?;
+         let device = NvmeDeviceInner {
+             submission_queues: init_ctx
+@@ -542,6 +555,8 @@ struct InitContext {
+     completion_queues: [NvmeCompletionQueue; QUEUE_NUM],
+     transport: NvmePciTransport,
+     dstrd: u16,
++    /// Size (0-based) of the I/O queues: `QUEUE_DEPTH - 1` capped at `CAP.MQES`.
++    io_queue_size: u16,
+     cc_mps_value: u32,
+     controller_ready_timeout: Duration,
+     max_io_bytes: NonZeroUsize,
+@@ -584,6 +599,7 @@ impl InitContext {
+     fn new(
+         transport: NvmePciTransport,
+         dstrd: u16,
++        io_queue_size: u16,
+         cc_mps_value: u32,
+         controller_ready_timeout: Duration,
+     ) -> Result<Self, NvmeDeviceError> {
+@@ -596,6 +612,7 @@ impl InitContext {
+             completion_queues: [cq0, cq1],
+             transport,
+             dstrd,
++            io_queue_size,
+             cc_mps_value,
+             controller_ready_timeout,
+             max_io_bytes: MAX_BYTES_BY_NLB,
+@@ -736,6 +753,19 @@ impl InitContext {
+         })
+     }
+ 
++    /// Negotiates the number of I/O queues (Set Features, Number of Queues).
++    ///
++    /// Required by the spec before I/O queues are created; the EBS controller
++    /// on EC2 enforces it and answers Create I/O Completion Queue with
++    /// "Invalid Field in Command" otherwise.
++    fn set_number_of_queues(&mut self) -> Result<(), NvmeDeviceError> {
++        let wanted = (QUEUE_NUM - 1) as u16 - 1; // 0-based
++        let entry = nvme_cmd::set_features_num_queues(wanted, wanted);
++        self.submit_and_wait_polling(ADMIN_QID, entry).inspect_err(|e| {
++            warn!("Set Features (Number of Queues = {}) failed: {:?}", wanted + 1, e);
++        })
++    }
++
+     fn create_io_queues(&mut self) -> Result<IoMsixVectors, NvmeDeviceError> {
+         // Pre-allocate MSI-X vectors for I/O queues
+         let io_msix_vectors = {
+@@ -758,20 +788,27 @@ impl InitContext {
+             let entry = nvme_cmd::create_io_completion_queue(
+                 io_qid as u16,
+                 cptr,
+-                (QUEUE_DEPTH - 1) as u16,
++                self.io_queue_size,
+                 Some(msix_vector),
+             );
+-            self.submit_and_wait_polling(ADMIN_QID, entry)?;
++            self.submit_and_wait_polling(ADMIN_QID, entry).inspect_err(|e| {
++                warn!(
++                    "Create I/O CQ {} (size {}, vector {}) failed: {:?}",
++                    io_qid, self.io_queue_size, msix_vector, e
++                );
++            })?;
+ 
+             let sptr = self.submission_queues[io_qid].sq_daddr();
+ 
+             let entry = nvme_cmd::create_io_submission_queue(
+                 io_qid as u16,
+                 sptr,
+-                (QUEUE_DEPTH - 1) as u16,
++                self.io_queue_size,
+                 io_qid as u16,
+             );
+-            self.submit_and_wait_polling(ADMIN_QID, entry)?;
++            self.submit_and_wait_polling(ADMIN_QID, entry).inspect_err(|e| {
++                warn!("Create I/O SQ {} (size {}) failed: {:?}", io_qid, self.io_queue_size, e);
++            })?;
+         }
+ 
+         Ok(IoMsixVectors(io_msix_vectors))
+@@ -782,6 +819,7 @@ impl InitContext {
+         qid: usize,
+         entry: NvmeCommand,
+     ) -> Result<(), NvmeDeviceError> {
++        let opcode = entry.opcode;
+         let expected_cid = self
+             .sq_mut(qid)
+             .submit(entry)
+@@ -816,6 +854,10 @@ impl InitContext {
+                 continue;
+             };
+             if cqe.has_error() {
++                ostd::early_println!(
++                    "[kernel] nvme: admin opcode {:#04x} (CID {}) rejected",
++                    opcode, expected_cid
++                );
+                 return Err(NvmeDeviceError::CommandFailed);
+             }
+ 
+diff --git a/kernel/core/comps/nvme/src/nvme_cmd.rs b/kernel/core/comps/nvme/src/nvme_cmd.rs
+index c55051a1..92cc5153 100644
+--- a/kernel/core/comps/nvme/src/nvme_cmd.rs
++++ b/kernel/core/comps/nvme/src/nvme_cmd.rs
+@@ -23,6 +23,8 @@ enum AdminCommandSet {
+     CreateIocq = 0x05,
+     /// Identify command. See Section 5.17.
+     IdentifyCommand = 0x06,
++    /// Set Features command. See Section 5.27.
++    SetFeatures = 0x09,
+ }
+ 
+ /// I/O Command Set opcodes (NVM Command Set).
+@@ -90,6 +92,23 @@ pub(crate) fn create_io_submission_queue(
+     )
+ }
+ 
++/// Builds a Set Features (Number of Queues, FID 07h) admin command. See Section 5.27.1.14.
++///
++/// `nsq`/`ncq` are 0-based counts of I/O submission/completion queues. Linux
++/// issues this before creating any I/O queue; some controllers (the EBS NVMe
++/// controller on EC2 Nitro among them) reject Create I/O Completion Queue with
++/// "Invalid Field" until the number of queues has been negotiated.
++pub(crate) fn set_features_num_queues(nsq: u16, ncq: u16) -> NvmeCommand {
++    const FID_NUMBER_OF_QUEUES: u32 = 0x07;
++    NvmeCommand::from_raw_fields(
++        AdminCommandSet::SetFeatures as u8,
++        0,
++        0,
++        [0, 0],
++        [FID_NUMBER_OF_QUEUES, ((ncq as u32) << 16) | (nsq as u32)],
++    )
++}
++
+ /// Builds a Delete I/O Completion Queue admin command. See Section 5.6.
+ #[expect(dead_code)]
+ pub(crate) fn delete_io_completion_queue(qid: u16) -> NvmeCommand {
+diff --git a/kernel/core/comps/nvme/src/nvme_queue.rs b/kernel/core/comps/nvme/src/nvme_queue.rs
+index 4ed21417..bb4d3ae4 100644
+--- a/kernel/core/comps/nvme/src/nvme_queue.rs
++++ b/kernel/core/comps/nvme/src/nvme_queue.rs
+@@ -36,6 +36,8 @@ pub(crate) struct NvmeCompletionQueue {
+     cqueue: SafePtr<Cqring, DmaCoherent>,
+     head: u16,
+     phase: bool,
++    /// Number of entries the device was told about (`<= QUEUE_DEPTH`).
++    depth: u16,
+ }
+ 
+ struct Cqring {
+@@ -52,9 +54,17 @@ impl NvmeCompletionQueue {
+             cqueue: SafePtr::new(dma, 0),
+             head: 0,
+             phase: true,
++            depth: QUEUE_DEPTH as u16,
+         })
+     }
+ 
++    /// Limits the ring to `depth` entries (the storage stays `QUEUE_DEPTH`).
++    /// Must be called before the queue is created on the device.
++    pub(crate) fn set_depth(&mut self, depth: u16) {
++        debug_assert!(depth >= 2 && depth as usize <= QUEUE_DEPTH);
++        self.depth = depth;
++    }
++
+     /// Returns the DMA physical address of the completion ring.
+     pub(crate) fn cq_daddr(&self) -> usize {
+         self.cqueue.daddr()
+@@ -81,7 +91,7 @@ impl NvmeCompletionQueue {
+         let entry = ring_slot_ptr
+             .read()
+             .expect("CQ slot pointer must be valid within allocated DMA ring");
+-        self.head = (self.head + 1) % (QUEUE_DEPTH as u16);
++        self.head = (self.head + 1) % self.depth;
+         if self.head == 0 {
+             self.phase = !self.phase;
+         }
+@@ -133,9 +143,16 @@ impl<C: Default> NvmeSubmissionQueue<C> {
+ impl<C> NvmeSubmissionQueue<C> {
+     /// Updates the mirrored SQ head from the SQ head pointer in `completion`.
+     pub(crate) fn update_sq_head(&mut self, completion: &NvmeCompletion) {
+-        self.inner.head = completion.sq_head() % (QUEUE_DEPTH as u16);
++        self.inner.head = completion.sq_head() % self.inner.depth;
++    }
++
++    /// Limits the ring to `depth` entries; see [`NvmeCompletionQueue::set_depth`].
++    pub(crate) fn set_depth(&mut self, depth: u16) {
++        debug_assert!(depth >= 2 && depth as usize <= QUEUE_DEPTH);
++        self.inner.depth = depth;
+     }
+ 
++
+     /// Returns the DMA physical address of the submission ring.
+     pub(crate) fn sq_daddr(&self) -> usize {
+         self.inner.squeue.daddr()
+@@ -143,12 +160,13 @@ impl<C> NvmeSubmissionQueue<C> {
+ 
+     /// Returns the number of SQ slots available for new commands starting at the current tail.
+     pub(crate) fn free_slots(&self) -> usize {
++        let depth = self.inner.depth as usize;
+         let used = if self.inner.tail >= self.inner.head {
+             (self.inner.tail - self.inner.head) as usize
+         } else {
+-            QUEUE_DEPTH - (self.inner.head - self.inner.tail) as usize
++            depth - (self.inner.head - self.inner.tail) as usize
+         };
+-        (QUEUE_DEPTH - 1) - used
++        (depth - 1) - used
+     }
+ }
+ 
+@@ -177,6 +195,8 @@ struct NvmeSubmissionQueueInner {
+     squeue: SafePtr<Sqring, DmaCoherent>,
+     tail: u16,
+     head: u16,
++    /// Number of entries the device was told about (`<= QUEUE_DEPTH`).
++    depth: u16,
+ }
+ 
+ struct Sqring {
+@@ -193,6 +213,7 @@ impl NvmeSubmissionQueueInner {
+             squeue: SafePtr::new(dma, 0),
+             tail: 0,
+             head: 0,
++            depth: QUEUE_DEPTH as u16,
+         })
+     }
+ 
+@@ -202,7 +223,7 @@ impl NvmeSubmissionQueueInner {
+     ///
+     /// Returns the new tail index for the SQ Tail doorbell, or `None` if full.
+     fn submit(&mut self, entry: NvmeCommand) -> Option<u16> {
+-        let next_tail = (self.tail + 1) % (QUEUE_DEPTH as u16);
++        let next_tail = (self.tail + 1) % self.depth;
+         if next_tail == self.head {
+             return None;
+         }
+@@ -261,8 +282,10 @@ where
+     fn poll(&mut self) -> Option<(NvmeCompletion, u16)> {
+         let (new_head, entry) = self.queue.complete()?;
+         if entry.has_error() {
+-            warn!(
+-                "completion queue {}: command failed (CID={}, status={:04X}, SC={:#04x}, SQID={})",
++            // Visible at every log level: on EC2 this is the only clue when the
++            // EBS controller rejects a setup command.
++            ostd::early_println!(
++                "[kernel] nvme: completion queue {}: command failed (CID={}, status={:#06x}, SC={:#04x}, SQID={})",
+                 self.qid,
+                 entry.cid(),
+                 entry.status(),
+diff --git a/kernel/core/comps/nvme/src/nvme_regs.rs b/kernel/core/comps/nvme/src/nvme_regs.rs
+index 11e7575f..ea6a0e59 100644
+--- a/kernel/core/comps/nvme/src/nvme_regs.rs
++++ b/kernel/core/comps/nvme/src/nvme_regs.rs
+@@ -68,6 +68,8 @@ pub(crate) enum NvmeRegs64 {
+ pub(crate) const NVME_BAR0_FIXED_REGS_END: u64 = NvmeRegs64::Pmrmsc as u64 + 8;
+ 
+ impl NvmeRegs64 {
++    /// CAP.MQES bit mask (maximum queue entries supported, 0-based).
++    pub(crate) const CAP_MQES_MASK: u64 = 0xffff;
+     /// CAP.DSTRD bit shift.
+     pub(crate) const CAP_DSTRD_SHIFT: u32 = 32;
+     /// CAP.DSTRD bit mask.
+diff --git a/kernel/core/comps/nvme/src/nvme_spec.rs b/kernel/core/comps/nvme/src/nvme_spec.rs
+index 3b804056..ea47614a 100644
+--- a/kernel/core/comps/nvme/src/nvme_spec.rs
++++ b/kernel/core/comps/nvme/src/nvme_spec.rs
+@@ -14,7 +14,7 @@ use ostd::mm::dma::DmaCoherent;
+ #[derive(Clone, Copy, Debug, Pod)]
+ pub(crate) struct NvmeCommand {
+     /// Opcode.
+-    opcode: u8,
++    pub(crate) opcode: u8,
+     /// Flags.
+     flags: u8,
+     /// Command ID.
