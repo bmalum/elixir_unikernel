@@ -48,10 +48,9 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
   by the kernel client on Asterinas; `/init` on Linux does not renew).
 - EC2: x86-64 Nitro instances with ENA only (tested on t3.small); one Rx/Tx
   queue pair without offloads, so throughput is a fraction of what the
-  instance allows. One NVMe I/O queue. No IPv6. ACPI power events from the
-  EC2 API are ignored (guest-initiated reboots work).
-- Power-off: there is no ACPI S5 without AML, so `poweroff` resets the
-  machine instead (QEMU exits through `isa-debug-exit`).
+  instance allows. One NVMe I/O queue. No IPv6.
+- Power: the ACPI power button and S5 work (EC2 stop/reboot/terminate);
+  other ACPI events (sleep button, lid, thermal) are ignored.
 - Asterinas only: interface configuration from the command line (the address
   is compiled into the kernel), binding a socket to `0.0.0.0` and reaching it
   over loopback, hardware other than virtio.

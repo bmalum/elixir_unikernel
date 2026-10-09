@@ -213,6 +213,39 @@ through `early_println!` so the next controller quirk is visible at
 `loglevel=error`. Result: `/dev/nvme1n1` (a data volume on `/dev/sdf`)
 mounts as ext2 on a t3.small and the boot counter survives a reboot.
 
+## 0008: ACPI power button and S5
+
+Symptom: `aws ec2 stop-instances` left the instance in `stopping` for four
+minutes and `reboot-instances` took as long; both only completed when EC2
+gave up and hard-reset. EC2 implements both by pressing the ACPI power
+button; the kernel had no idea the button existed, and `poweroff` could at
+best reset the machine (patch 0006), which `stop-instances` does not accept.
+
+The patch adds two things, both without an AML interpreter:
+
+- `ostd` collects the PM1a/PM1b event and control ports from the FADT and
+  scans the DSDT and every SSDT for `Name (_S5_, Package {...})`, reading
+  the two sleep-type constants. Nitro keeps `_S5` in an SSDT with sleep type
+  `(0, 0)`; QEMU has it in the DSDT, also `(0, 0)`. Unparsed or missing
+  encodings are printed as raw bytes so the next firmware can be added.
+- `kernel/core/src/arch/x86/power.rs` enables `PWRBTN_EN`, polls
+  `PM1_STS.PWRBTN_STS` from the timer tick every 50 ms (the SCI stays masked
+  at the IOAPIC, so no interrupt routing is needed), clears it and sends
+  `SIGPWR` to PID 1, at most once per 5 s. `poweroff` writes `SLP_TYP` and
+  `SLP_EN` to the PM1 control registers before falling back to a reset.
+
+A side fix in `ostd`: the "running in QEMU" check accepted the `KVMKVMKVM`
+hypervisor signature, which Nitro also presents, so the QEMU
+`isa-debug-exit` handler was installed on EC2 and shadowed the ACPI path.
+It now also requires the firmware OEM ID `BOCHS `.
+
+`/init` handles `SIGPWR` by sending `SIGTERM` to `beam.smp` (ERTS runs
+`init:stop/0`), waiting up to 20 s, then powering off; on Linux it watches
+`/dev/input/event*` for `KEY_POWER` instead, since that kernel reports the
+button as an input event. Measured on a t3.small: `stop-instances` reaches
+`stopped` in 14 to 20 s, `reboot-instances` is back with the next boot in
+41 to 48 s, on both kernels.
+
 ## Reporting upstream
 
 The patches are `git diff` output against `3d85cb4`, apply in order with

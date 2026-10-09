@@ -80,9 +80,10 @@ use; CloudWatch Logs permissions only) and user data that turns on
 script then checks ten more things: IMDS identity, user-data overrides, NTP
 sync, `/data` mounted, `boot_count 1`, the CloudWatch shipper, the
 guest-initiated reboot, `boot_count 2` on the second boot, log events in
-`/elixir_unikernel/smoke/<instance-id>` and the `BootCount` EMF document.
-Both kernels pass all 18 (Asterinas `ami-041b91c02aeffebe1`, Linux
-`ami-057a7b81c6d39f539`).
+`/elixir_unikernel/smoke/<instance-id>`, the `BootCount` EMF document, and
+then times `aws ec2 reboot-instances` (next boot visible within 180 s) and
+`aws ec2 stop-instances` (`stopped` within 150 s). Both kernels pass all 23
+(Asterinas `ami-0b7ba8bda566dc68c`, Linux `ami-058539254c3af3853`).
 
 `KEEP=1` leaves the instance running. The console is saved to
 `build/logs/ec2-<label>.log`.
@@ -145,6 +146,11 @@ a 1 GiB volume is cents.
   machine and the AMI boots again (about 45 s). Set `uniapp.on_exit=poweroff`
   with `--instance-initiated-shutdown-behavior terminate` if the ASG should
   replace the instance instead.
+- **`stop-instances`, `reboot-instances`, `terminate-instances`** press the
+  ACPI power button. The kernel turns it into `SIGPWR`, `/init` stops the VM
+  with `SIGTERM` (ERTS shuts the applications down in order), waits up to
+  20 s and powers off through ACPI S5. Stops complete in about 15 s, reboots
+  in about 45 s, instead of EC2's four-minute hard reset.
 - **State** lives on an EBS volume mounted at `/data` (`uniapp.data=auto`),
   ext2, so write small files and `fsync`. `scripts/mkdata.sh` makes an empty
   image, `scripts/ami-publish.py --snapshot-only` turns it into a snapshot to
@@ -164,8 +170,5 @@ a 1 GiB volume is cents.
   reports 32 queue entries and rejects larger queues); it has one I/O queue
   and no interrupts tuning, fine for a boot counter and crash dumps, not for
   a database.
-- `aws ec2 reboot-instances` and `stop-instances` send ACPI events the kernel
-  ignores; EC2 falls back to a hard reset after a few minutes. Reboots
-  initiated from the guest work.
 - IPv6 is not used. Graviton (arm64), Xen-based instance types and
   Marketplace publishing are out of scope.

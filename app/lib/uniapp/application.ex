@@ -21,8 +21,21 @@ defmodule Uniapp.Application do
 
     result = Supervisor.start_link(children, strategy: :one_for_one, name: Uniapp.Supervisor)
     if boot_count, do: Uniapp.Cloudwatch.metric("BootCount", boot_count)
+    halt_after_first_boot(boot_count)
     result
   end
+
+  # Test hook for the restart path: `uniapp.halt_after_first_boot=MS` stops the
+  # VM MS milliseconds into the first boot of a data volume (boot_count 1) and
+  # never again, so a smoke test can watch /init reboot the machine once.
+  defp halt_after_first_boot(1) do
+    case Uniapp.Cmdline.get("uniapp.halt_after_first_boot") do
+      nil -> :ok
+      ms -> :timer.apply_after(String.to_integer(ms), :erlang, :halt, [0])
+    end
+  end
+
+  defp halt_after_first_boot(_), do: :ok
 
   # Seconds since kernel boot, if the kernel exposes /proc/uptime.
   defp uptime do

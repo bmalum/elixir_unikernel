@@ -21,6 +21,9 @@
  * /init stays PID 1 as a supervisor: it forks beam.smp, reaps orphans, resyncs
  * the clock hourly and reboots (or powers off) the machine when the VM exits,
  * so a crashed node is replaced by its auto-scaling group instead of hanging.
+ * SIGPWR (the kernel's translation of the ACPI power button, which is what
+ * `aws ec2 stop-instances` and `reboot-instances` press) asks beam.smp to stop
+ * with SIGTERM (ERTS runs init:stop/0), waits up to 20 s, then powers off.
  *
  * Statically linked against musl; no libc beyond what musl provides.
  */
@@ -50,6 +53,7 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <poll.h>
+#include <signal.h>
 
 #ifndef RELEASE_ROOT
 #define RELEASE_ROOT "/rel"
@@ -601,6 +605,42 @@ static void setup_data(void) {
 }
 
 /* ------------------------------------------------------------------ supervisor */
+static volatile sig_atomic_t g_power_button;
+static void on_sigpwr(int sig) { (void)sig; g_power_button = 1; }
+
+/* Linux reports the ACPI power button as KEY_POWER on an evdev device (there
+   is no signal); Asterinas sends SIGPWR instead. Watch both. */
+#define MAX_INPUT_FDS 8
+static int g_input_fds[MAX_INPUT_FDS], g_input_n;
+
+static void open_input_devices(void) {
+    DIR *d = opendir("/dev/input");
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && g_input_n < MAX_INPUT_FDS) {
+        if (strncmp(e->d_name, "event", 5)) continue;
+        char path[64]; snprintf(path, sizeof path, "/dev/input/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) g_input_fds[g_input_n++] = fd;
+    }
+    closedir(d);
+}
+
+/* struct input_event on x86-64: timeval (16) + type, code (u16) + value (s32). */
+static void poll_input_devices(void) {
+    for (int i = 0; i < g_input_n; i++) {
+        unsigned char ev[24];
+        while (read(g_input_fds[i], ev, sizeof ev) == (ssize_t)sizeof ev) {
+            uint16_t type, code; int32_t value;
+            memcpy(&type, ev + 16, 2); memcpy(&code, ev + 18, 2); memcpy(&value, ev + 20, 4);
+            if (type == 1 /* EV_KEY */ && code == 116 /* KEY_POWER */ && value == 1) {
+                logmsg("power button (evdev)");
+                g_power_button = 1;
+            }
+        }
+    }
+}
+
 static void power_action(const char *what) {
     sync();
     if (g_data_mounted) umount("/data");
@@ -614,13 +654,25 @@ static void power_action(const char *what) {
 /* Waits for `child` while reaping any other orphans, resyncing the clock once
    an hour. Returns when `child` has exited. */
 static void supervise(pid_t child, int *status) {
-    time_t last_sync = time(NULL);
+    time_t last_sync = time(NULL), term_sent = 0;
+    open_input_devices();
     for (;;) {
         int st; pid_t p = waitpid(-1, &st, WNOHANG);
         if (p == child) { *status = st; return; }
         if (p < 0 && errno == ECHILD) { *status = 0; return; }
+        poll_input_devices();
+        if (g_power_button && !term_sent) {
+            logmsg("power button: stopping beam.smp (SIGTERM), power off follows");
+            kill(child, SIGTERM);
+            term_sent = time(NULL);
+        }
+        if (term_sent && time(NULL) - term_sent >= 20) {
+            logmsg("power button: beam.smp did not stop within 20 s, killing it");
+            kill(child, SIGKILL);
+            term_sent = time(NULL) + 1000;   /* once */
+        }
         if (p == 0) {
-            sleep(1);
+            if (g_power_button) usleep(200 * 1000); else usleep(250 * 1000);
             if (g_ntp && time(NULL) - last_sync >= 3600) {
                 int64_t ms = sntp_sync(g_ntp);
                 if (ms != INT64_MIN && (ms > 50 || ms < -50)) logmsg("ntp: correction %lld ms", (long long)ms);
@@ -733,11 +785,16 @@ int main(void) {
         _exit(127);
     }
     close(0);
+    signal(SIGPWR, on_sigpwr);
+    signal(SIGINT, SIG_IGN); signal(SIGTERM, SIG_IGN);   /* only the power button stops PID 1 */
     int status = 0;
     supervise(child, &status);
     if (WIFEXITED(status)) logmsg("beam.smp exited with status %d", WEXITSTATUS(status));
     else if (WIFSIGNALED(status)) logmsg("beam.smp killed by signal %d", WTERMSIG(status));
     else logmsg("beam.smp ended (status %#x)", status);
-    power_action(on_exit);
+    /* A power button press means the operator wants the machine off (EC2 then
+       stops it, or starts it again for reboot-instances); uniapp.on_exit is for
+       the VM exiting on its own. */
+    power_action(g_power_button ? "poweroff" : on_exit);
     return 1;
 }
