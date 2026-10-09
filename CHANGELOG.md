@@ -66,6 +66,17 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   (Linux) by stopping the VM with `SIGTERM` and powering off; the Linux EC2
   kernel gains `ACPI_BUTTON`.
 
+- Sample app: `Uniapp.Health` serves `/healthz` (503 until ready, then 200
+  with JSON details) and `/livez` on 8080 for ALB/ASG health checks, and a
+  throughput self-test (`BENCH`), also against a peer (`uniapp.bench_peer`).
+- Asterinas patch 0009: ENA AENQ handling with keep-alive watchdog and a
+  device reset path, TCP/UDP checksum offload, multiple queue pairs with
+  RSS (`ena.queues=`), and health work moved out of the timer interrupt.
+  `scripts/bench-ec2.sh` measures NIC to NIC: 77 to 108 MB/s round trip
+  between two t3.small.
+- `scripts/smoke-ec2.sh`: health endpoint, BENCH/BULK, ENA ready and
+  keep-alive assertions (29 in total); `QUICK=1` short mode.
+
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.
 - `/init` no longer `exec`s `beam.smp`; the VM runs as PID 2 under the

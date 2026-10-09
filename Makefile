@@ -37,7 +37,8 @@ NET_ARGS     := uniapp.tls_host=$(TLS_HOST)
 HOST_PORT_TCP ?= 14000
 HOST_PORT_UDP ?= 14001
 HOST_PORT_TLS ?= 14443
-export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS
+HOST_PORT_HTTP ?= 18088
+export HOST_PORT_TCP HOST_PORT_UDP HOST_PORT_TLS HOST_PORT_HTTP
 
 .DEFAULT_GOAL := help
 .PHONY: help check all release initramfs m0-kernel run-m0 run-m0-app smoke-m0 \
@@ -92,7 +93,7 @@ $(BUILD)/vmlinux-m0:
 # disable-legacy=on: Asterinas only speaks modern virtio (also fine for Linux).
 QEMU_BASE = $(QEMU) -machine q35,kernel-irqchip=split,accel=$(QEMU_ACCEL) -cpu Icelake-Server,+x2apic \
   -nographic -no-reboot \
-  -netdev user,id=n0,hostfwd=tcp::$(HOST_PORT_TCP)-:4000,hostfwd=udp::$(HOST_PORT_UDP)-:4001,hostfwd=tcp::$(HOST_PORT_TLS)-:4443 \
+  -netdev user,id=n0,hostfwd=tcp::$(HOST_PORT_TCP)-:4000,hostfwd=udp::$(HOST_PORT_UDP)-:4001,hostfwd=tcp::$(HOST_PORT_TLS)-:4443,hostfwd=tcp::$(HOST_PORT_HTTP)-:8080 \
   -device virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off \
   -device virtio-rng-pci,disable-legacy=on,disable-modern=off \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
@@ -146,7 +147,9 @@ DISK_MODE   ?= app
 DISK        := $(BUILD)/disk-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
 # uniapp.imds=1: read user data and identity from the instance metadata service.
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp uniapp.imds=1
+# ENA_ARGS: driver knobs for experiments, e.g. "ena.queues=1 ena.offload=0 ena.aenq_irq=0".
+ENA_ARGS ?=
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp uniapp.imds=1 $(ENA_ARGS)
 DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init uniapp.imds=1
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2

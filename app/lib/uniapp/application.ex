@@ -16,6 +16,7 @@ defmodule Uniapp.Application do
       Supervisor.child_spec({Uniapp.Echo, kind: :tcp, port: echo_port()}, id: :echo_tcp),
       Supervisor.child_spec({Uniapp.Echo, kind: :udp, port: echo_port() + 1}, id: :echo_udp),
       Supervisor.child_spec({Uniapp.Echo, kind: :tls, port: 4443}, id: :echo_tls),
+      Uniapp.Health,
       Uniapp.Probe
     ]
 

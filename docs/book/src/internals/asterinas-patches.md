@@ -246,6 +246,59 @@ button as an input event. Measured on a t3.small: `stop-instances` reaches
 `stopped` in 14 to 20 s, `reboot-instances` is back with the next boot in
 41 to 48 s, on both kernels.
 
+## 0009: ENA driver, second round
+
+Patch 0005 was the minimum that passes traffic. 0009 adds what a service
+behind a load balancer needs; all of it in `kernel/core/comps/ena`.
+
+- **AENQ.** Link change, fatal error, warning, notification and keep-alive
+  groups are enabled; the queue is drained every 100 ms. A keep-alive
+  arrives every second; after 6 s without one (Linux's `KALIVE_TIMEOUT`)
+  the driver resets the device. The admin interrupt stays masked and the
+  AENQ is polled (`ena.aenq_irq=1` unmasks it; with it unmasked the guest
+  hung after a reset, see below).
+- **Reset path.** `AdminQueue::reinit` resets the device and re-programs
+  the admin queue; the queue pairs, Rx buffers, RSS and AENQ are then
+  rebuilt. Resets are *requested* from the health check and *performed* in
+  the network softirq. `ena.test_reset=SECONDS` forces one. Measured on a
+  t3.small: 2 ms for the reset, and the device's own counters (`GET_STATS`)
+  start moving again within 10 s, after which TCP from the internet works.
+  If they do not move while the stack is sending, the driver reboots the
+  machine, which is known to restore service.
+- **Checksum offload.** `STATELESS_OFFLOAD_CONFIG` is queried; for IPv4
+  TCP/UDP frames the driver writes the pseudo-header sum into the L4
+  checksum field (Linux's `CHECKSUM_PARTIAL`), sends one cached meta
+  descriptor per queue with the header geometry and sets
+  `L4_CSUM_EN|L4_CSUM_PARTIAL`. smoltcp's checksum capabilities are set to
+  `None` for TCP/UDP when the device also verifies on Rx; frames the device
+  flags bad are dropped. Getting the pseudo-header right mattered: with the
+  full checksum left in place the device produced wrong sums and every TLS
+  handshake stalled.
+- **Queue pairs and RSS.** `ena.queues=N|auto` (default 1, `auto` = one per
+  vCPU, max 8). Each pair has its own MSI-X vector; Rx is drained round
+  robin, Tx picks the next pair with room. RSS: Toeplitz over the IPv4
+  5-tuple, 128-entry indirection table over the Rx completion queues.
+  Measured NIC to NIC with `scripts/bench-ec2.sh` (two t3.small in one
+  subnet, 8 MB through the peer's TCP echo, round trip): one pair 77 to
+  108 MB/s, two pairs 34 to 51 MB/s. A single flow hashes to one Rx queue
+  while Tx alternates queues, so for a single flow one pair is faster; two
+  pairs pay off with many flows. Hence the default.
+- **Tx completion accounting** counts the descriptors each request used
+  (meta + data) instead of trusting `sq_head_idx`.
+
+Two things learnt the expensive way. First: never do MMIO reads or admin
+commands from the timer interrupt. The first version polled the AENQ and
+read `DEV_STS` from the tick while holding the device lock; a readless MMIO
+read can take milliseconds, and about one boot in five stalled right after
+DHCP with the network softirq locked out. Moving the health work into the
+softirq (the tick only sets a flag and raises it) fixed it. Second: a
+device that passes no traffic after a reset is not necessarily broken; the
+Nitro ENA needs a few seconds before its data path is live again, and
+hammering it with `GET_STATS` in that window made it worse.
+
+`aster-bigtcp` gains `TxPacket::data_writer` for the in-place checksum
+patch.
+
 ## Reporting upstream
 
 The patches are `git diff` output against `3d85cb4`, apply in order with

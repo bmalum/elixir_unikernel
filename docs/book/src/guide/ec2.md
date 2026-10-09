@@ -135,6 +135,30 @@ aws ec2 describe-instances --filters Name=tag:Project,Values=elixir_unikernel \
 A `t3.small` costs about 18 USD per month if left running; the snapshot of
 a 1 GiB volume is cents.
 
+## Health checks and throughput
+
+The sample app serves `GET /healthz` on port 8080 (`uniapp.health_port=`):
+503 `{"status":"starting"}` until the echo servers listen, then 200 with
+uptime, memory, process count, instance id, boot count and the last
+measured echo throughput; `GET /livez` is 200 as soon as the socket is
+open. For an ALB target group use path `/healthz`, port 8080, matcher 200;
+for an auto-scaling group set the health check type to ELB. The
+implementation (`app/lib/uniapp/health.ex`, 160 lines of `:gen_tcp`) is
+the template for your own application's endpoint.
+
+Throughput, t3.small, Asterinas with the ENA driver after patch 0009:
+
+| Path | Result |
+|---|---|
+| guest-side echo through the NIC driver (`BENCH tcp_echo`, 8 MB) | 78 to 101 MB/s |
+| NIC to NIC, two instances, same subnet (`scripts/bench-ec2.sh`) | 77 to 108 MB/s round trip, one queue pair |
+| same with `ena.queues=2` | 34 to 51 MB/s (single flow; see the patch notes) |
+| from a laptop over the internet (`BULK`, 4 MB) | about 1 MB/s, latency bound |
+
+`scripts/bench-ec2.sh <ami> [kernel args]` launches two instances, has the
+second push 8 MB through the first's TCP echo and prints the sender's
+`BENCH tcp_echo_peer` line; both are terminated afterwards.
+
 ## Operating it
 
 - **Configuration** comes from EC2 user data, not from rebuilding the AMI:
@@ -164,8 +188,9 @@ a 1 GiB volume is cents.
 
 ## What does not work yet
 
-- Only one ENA queue pair, no LLQ, no checksum offload; see the
-  [ENA driver notes](../internals/asterinas-patches.md#0005-the-ena-network-driver).
+- ENA: no LLQ, no TSO; one queue pair by default (`ena.queues=auto` for
+  one per vCPU). See the
+  [ENA driver notes](../internals/asterinas-patches.md#0009-ena-driver-second-round).
 - Asterinas's NVMe driver needs patch 0007 to talk to EBS (the controller
   reports 32 queue entries and rejects larger queues); it has one I/O queue
   and no interrupts tuning, fine for a boot counter and crash dumps, not for

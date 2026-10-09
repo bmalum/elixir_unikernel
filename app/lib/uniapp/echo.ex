@@ -15,6 +15,9 @@ defmodule Uniapp.Echo do
 
   def start_link(opts), do: Task.start_link(__MODULE__, :run, [opts])
 
+  @doc "Kinds (`:tcp`, `:udp`, `:tls`) that currently have a listen socket."
+  def listening, do: :persistent_term.get({__MODULE__, :listening}, [])
+
   def run(opts) do
     kind = Keyword.fetch!(opts, :kind)
     port = Keyword.fetch!(opts, :port)
@@ -23,6 +26,7 @@ defmodule Uniapp.Echo do
       {:ok, lsock} ->
         Logger.info("echo: listening #{kind}/#{port}")
         IO.puts("LISTEN #{kind} #{port}")
+        :persistent_term.put({__MODULE__, :listening}, Enum.uniq([kind | listening()]))
         serve(kind, lsock)
 
       {:error, reason} ->

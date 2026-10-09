@@ -64,8 +64,9 @@ SG=$(aws ec2 create-security-group --group-name "elixir_unikernel-smoke-$LABEL-$
       --vpc-id "$VPC" --tag-specifications "ResourceType=security-group,Tags=[$TAGS]" --query GroupId --output text)
 aws ec2 authorize-security-group-ingress --group-id "$SG" --ip-permissions \
   "IpProtocol=tcp,FromPort=4000,ToPort=4000,IpRanges=[{CidrIp=$CLIENT_CIDR}]" \
-  "IpProtocol=tcp,FromPort=4443,ToPort=4443,IpRanges=[{CidrIp=$CLIENT_CIDR}]" >/dev/null
-echo "security group $SG (4000, 4443 from $CLIENT_CIDR)"
+  "IpProtocol=tcp,FromPort=4443,ToPort=4443,IpRanges=[{CidrIp=$CLIENT_CIDR}]" \
+  "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=$CLIENT_CIDR}]" >/dev/null
+echo "security group $SG (4000, 4443, 8080 from $CLIENT_CIDR)"
 
 # IAM role + instance profile for CloudWatch (idempotent; kept between runs, tagged).
 ensure_role() {
@@ -95,7 +96,8 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   EXTRA+=(--user-data "uniapp.cloudwatch=1
 uniapp.log_group=/elixir_unikernel/smoke
 uniapp.data=auto
-uniapp.halt_after_first_boot=75000")
+uniapp.halt_after_first_boot=75000${ENA_USERDATA:+
+$ENA_USERDATA}")
   echo "data volume from $DATA_SNAPSHOT, role $ROLE, user data with uniapp.cloudwatch=1"
 fi
 
@@ -137,6 +139,13 @@ done
 tls=$( (echo "tls-hello"; sleep 2) | timeout 20 openssl s_client -connect "$IP:4443" -tls1_3 -quiet 2>/dev/null | head -1 || true)
 [ "$tls" = "tls-hello" ] && ok "internet -> instance TLS 1.3 4443 echo" || bad "TLS echo: '$tls'"
 
+# Health endpoint: what an ALB target group or ASG health check would call.
+hz=$(curl -s --max-time 10 -w '\n%{http_code}' "http://$IP:8080/healthz" 2>/dev/null || true)
+hz_code=$(echo "$hz" | tail -1); hz_body=$(echo "$hz" | sed '$d')
+[ "$hz_code" = 200 ] && echo "$hz_body" | grep -q '"status":"ok"' && ok "GET /healthz -> 200 $(echo "$hz_body" | cut -c1-120)" || bad "GET /healthz -> '$hz_code' $hz_body"
+lz=$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' "http://$IP:8080/livez" 2>/dev/null || true)
+[ "$lz" = 200 ] && ok "GET /livez -> 200" || bad "GET /livez -> '$lz'"
+
 # Probes need the DNS/TLS round trip to the internet; give the console time to catch up.
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   console > "$LOG"
@@ -144,7 +153,50 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 grep -q 'PROBE dns ok' "$LOG" && ok "PROBE dns ok" || bad "PROBE dns: $(grep -m1 'PROBE dns' "$LOG" || echo missing)"
 grep -q 'PROBE tls ok' "$LOG" && ok "PROBE tls ok" || bad "PROBE tls: $(grep -m1 'PROBE tls' "$LOG" || echo missing)"
+for _ in 1 2 3 4 5 6; do grep -q '^BENCH tcp_echo' "$LOG" && break; sleep 10; console > "$LOG"; done
+grep -q '^BENCH tcp_echo' "$LOG" && ok "$(grep -m1 '^BENCH tcp_echo' "$LOG") (guest-side echo through the NIC driver)" || bad "no BENCH line"
+
+# Bulk transfer from here: 4 MB of 1 KiB lines through the TCP echo, MB/s round trip.
+bulk=$(python3 - "$IP" <<'PY' 2>&1
+import socket, sys, time, threading
+host = sys.argv[1]; line = b"y" * 1023 + b"\n"; n = 4096
+s = socket.create_connection((host, 4000), 10); s.settimeout(20)
+t0 = time.time()
+def send():
+    for _ in range(n): s.sendall(line)
+th = threading.Thread(target=send); th.start()
+got = 0
+while got < n * len(line):
+    d = s.recv(1 << 16)
+    if not d: break
+    got += len(d)
+th.join(); dt = time.time() - t0; s.close()
+print("BULK %d bytes in %.0f ms = %.1f MB/s" % (got, dt*1000, got/dt/1e6))
+PY
+) || true
+echo "$bulk" | grep -q '^BULK' && ok "$(echo "$bulk" | grep '^BULK') (round trip from $MYIP)" || bad "bulk transfer: $(echo "$bulk" | grep -vE '^\s|^Traceback|^Exception' | tail -2 | tr '\n' ' ')"
 grep -qiE 'crash dump|Kernel panic|panicked at' "$LOG" && bad "crash in console" || ok "no crash"
+
+if [ -n "${QUICK:-}" ]; then
+  # QUICK=1: stop after the network checks, wait for the test reset, then re-check TCP.
+  sleep 50; console > "$LOG"
+  grep -q 'ena: reset done' "$LOG" && ok "ENA device reset exercised: $(grep -m1 -oE 'reset done in [0-9]+ ms.*' "$LOG")" || bad "no 'ena: reset done'"
+  r=$(python3 - "$IP" <<'PY' 2>&1
+import socket, sys
+try:
+    s = socket.create_connection((sys.argv[1], 4000), 5); s.sendall(b"hello\n"); print("TCP", s.recv(100) == b"hello\n"); s.close()
+except Exception as e: print("TCP False", e)
+PY
+)
+  if [ "$r" = "TCP True" ]; then ok "TCP echo after the reset (data path recovered in place)"; else
+    sleep 20; console > "$LOG"
+    if grep -q 'data path dead after reset' "$LOG" && [ "$(grep -c 'running /init' "$LOG")" -ge 2 ]; then
+      ok "data path did not recover; driver rebooted the machine and the second boot is up ($(grep -m1 'data path dead' "$LOG" | cut -c15-110))"
+    else bad "TCP echo after the reset: $r; no recovery reboot either"; fi
+  fi
+  echo "SMOKE $LABEL quick ($AMI): $PASS passed, $FAIL failed"
+  exit $(( FAIL > 0 ))
+fi
 
 if [ -n "${DATA_SNAPSHOT:-}" ]; then
   grep -qE '^\[init\] imds: i-' "$LOG" && ok "$(grep -m1 '^\[init\] imds: i-' "$LOG" | sed 's/^\[init\] //')" || bad "no IMDS identity line"
@@ -153,6 +205,10 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   grep -q 'data: .* mounted on /data' "$LOG" && ok "$(grep -m1 'mounted on /data' "$LOG" | sed 's/^\[init\] //')" || bad "data volume not mounted: $(grep -m1 'data:' "$LOG" || echo missing)"
   grep -q '^DATA boot_count 1 ' "$LOG" && ok "boot_count 1 on /data" || bad "boot counter: $(grep -m1 '^DATA' "$LOG" || echo missing)"
   grep -q '^CLOUDWATCH ' "$LOG" && ok "$(grep -m1 '^CLOUDWATCH' "$LOG")" || bad "CloudWatch shipper not started"
+  grep -qE 'ena: .* ready, [0-9]+ queue pairs?' "$LOG" && ok "$(grep -m1 -oE 'ena: .* ready, .*' "$LOG")" || bad "no ENA ready line"
+  # ena.test_reset=40 (user data): the driver resets the device 40 s after init;
+  # the data volume boot that follows at +75 s proves the NIC still works afterwards.
+  grep -q 'no keep-alive' "$LOG" && bad "keep-alive watchdog fired: $(grep -m1 'no keep-alive' "$LOG")" || ok "keep-alive watchdog quiet (AENQ keep-alives arriving)"
 
   # The VM exits (uniapp.eval above), /init reboots the machine, the second boot
   # must find the data volume with boot_count 1 and bump it.

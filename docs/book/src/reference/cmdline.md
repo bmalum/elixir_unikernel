@@ -21,6 +21,8 @@ quotes if they contain spaces; a value cannot itself contain a double quote.
 | `uniapp.data=auto\|/dev/X\|off` | unset | mount an ext2 data volume read-write at `/data` (`auto`: the first block device that mounts); exports `UNIAPP_DATA=/data`, crash dumps go to `/data/erl_crash.dump` |
 | `uniapp.cloudwatch=1` | unset | sample app: ship the log to CloudWatch Logs and publish EMF metrics using the instance role (needs `imds=1`) |
 | `uniapp.log_group=NAME` | `/elixir_unikernel` | CloudWatch log group; the stream is the instance id |
+| `uniapp.health_port=N` | `8080` | sample app: port of `/healthz` and `/livez` |
+| `uniapp.bench_peer=A.B.C.D` | unset | sample app: after boot, push 8 MB through that host's TCP echo and print `BENCH tcp_echo_peer` (`uniapp.bench_delay_ms`, default 30000) |
 | `uniapp.metric_namespace=NAME` | `elixir_unikernel` | CloudWatch namespace for `BootCount`, `Uptime`, `MemoryTotal`, `ProcessCount` |
 
 Keys from EC2 user data are read before the kernel's own line, so
@@ -36,6 +38,10 @@ Kernel-side keys that matter:
 | `loglevel=N` | kernel verbosity | `error`, `info`, `debug` (a word, not a number) |
 | `rdinit=/init` | tells Linux to run our init | default is `/init` already |
 | `ip=dhcp` | ignored (`/init` does DHCP itself) | in-kernel DHCP client on `eth0`, lease in `/proc/net/dhcp` |
+| `ena.queues=N\|auto` | n/a | ENA queue pairs (default 1; `auto` = one per vCPU, max 8). Kernel parameter: must be on the kernel command line (`ENA_ARGS`), not in user data |
+| `ena.offload=0` | n/a | ENA: software checksums instead of offload |
+| `ena.test_reset=SECONDS` | n/a | ENA: force one device reset after boot (tests the recovery path) |
+| `ena.aenq_irq=1` | n/a | ENA: unmask the admin interrupt (default polled) |
 | `quiet` | suppresses boot messages | ignored |
 
 Sample app environment (set in the `release` stage or by `/init`):

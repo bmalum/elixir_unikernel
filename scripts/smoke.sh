@@ -93,7 +93,7 @@ PY
 }
 
 # Fail fast if a previous QEMU still holds our forwarded host ports.
-for port in "$HOST_PORT_TCP" "$HOST_PORT_TLS"; do
+for port in "$HOST_PORT_TCP" "$HOST_PORT_TLS" "${HOST_PORT_HTTP:-}"; do [ -n "$port" ] || continue;
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "host port $port is in use ($(lsof -nP -iTCP:"$port" -sTCP:LISTEN | tail -1 | awk '{print $1, $2}')); set HOST_PORT_* or stop that process" >&2
     exit 2
