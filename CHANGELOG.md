@@ -55,8 +55,16 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
 - Asterinas patch 0007: NVMe honours `CAP.MQES` and issues Set Features
   (Number of Queues), so EBS volumes work.
 - `scripts/smoke-ec2.sh` with `DATA_SNAPSHOT`: IAM role, data volume, user
-  data, guest-initiated reboot, boot counter and CloudWatch assertions
-  (18 in total); `make smoke-ec2` wires it up.
+  data, guest-initiated reboot, boot counter and CloudWatch assertions, then
+  timed `aws ec2 reboot-instances` and `stop-instances` (23 in total);
+  `make smoke-ec2` wires it up.
+- Asterinas patch 0008: ACPI power button (polled `PM1_STS`, delivered as
+  `SIGPWR` to PID 1) and S5 power-off from the `_S5` package found in the
+  DSDT/SSDTs. `aws ec2 stop-instances` now stops in about 15 s and
+  `reboot-instances` reboots in about 45 s instead of EC2's 4-minute hard
+  reset. `/init` handles `SIGPWR` (Asterinas) and `KEY_POWER` on evdev
+  (Linux) by stopping the VM with `SIGTERM` and powering off; the Linux EC2
+  kernel gains `ACPI_BUTTON`.
 
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.

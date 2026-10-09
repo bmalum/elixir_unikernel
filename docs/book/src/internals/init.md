@@ -43,7 +43,10 @@ replaces the release's shell script, `erlexec`, and an init system.
    and performs `uniapp.on_exit` (default `reboot(RB_AUTOBOOT)`). The
    kernel's restart path (patch 0006) then resets the machine; on EC2 the
    same AMI boots again, which is how a crashed node heals under an
-   auto-scaling group.
+   auto-scaling group. A power button press (`SIGPWR` from the Asterinas
+   kernel, or `KEY_POWER` on `/dev/input/event*` on Linux) sends `SIGTERM`
+   to the VM, waits up to 20 s, and powers off regardless of
+   `uniapp.on_exit`; that is what EC2 stop and reboot requests become.
 
 ## The argument vector
 

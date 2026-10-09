@@ -89,13 +89,13 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   EXTRA+=(--iam-instance-profile "Name=$ROLE")
   EXTRA+=(--block-device-mappings "[{\"DeviceName\":\"/dev/sdf\",\"Ebs\":{\"SnapshotId\":\"$DATA_SNAPSHOT\",\"VolumeSize\":1,\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]")
   # User data overrides the baked-in command line (key=value lines, see /init).
-  # uniapp.eval makes the VM exit 75 s after boot: /init then reboots the machine
-  # (the guest-driven restart path; `aws ec2 reboot-instances` relies on ACPI
-  # events the kernel does not handle and would wait 4 minutes for a hard reset).
+  # halt_after_first_boot makes the VM exit 75 s into the first boot: /init then
+  # reboots the machine (the guest-driven restart path). Later boots stay up so
+  # that reboot-instances / stop-instances can be timed.
   EXTRA+=(--user-data "uniapp.cloudwatch=1
 uniapp.log_group=/elixir_unikernel/smoke
 uniapp.data=auto
-uniapp.eval=\"timer:apply_after(75000,erlang,halt,[0])\"")
+uniapp.halt_after_first_boot=75000")
   echo "data volume from $DATA_SNAPSHOT, role $ROLE, user data with uniapp.cloudwatch=1"
 fi
 
@@ -176,6 +176,37 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   [ "$events" != "0" ] && [ "$events" != "None" ] && ok "CloudWatch Logs: $events 'echo: listening' events in $group/$INSTANCE" || bad "CloudWatch Logs: no 'echo: listening' event in $group/$INSTANCE"
   emf=$(aws logs filter-log-events --log-group-name "$group" --log-stream-names "$INSTANCE" --filter-pattern '"BootCount"' --query 'length(events)' --output text 2>/dev/null || echo 0)
   [ "$emf" != "0" ] && [ "$emf" != "None" ] && ok "CloudWatch EMF: BootCount metric documents ($emf)" || bad "no EMF BootCount document"
+
+  # EC2 API reboot: an ACPI power-button press. The kernel turns it into SIGPWR,
+  # /init stops the VM and powers off, EC2 restarts the instance. Without that
+  # EC2 waits about 4 minutes before hard-resetting, so time is the proof.
+  echo "aws ec2 reboot-instances $INSTANCE"
+  T2=$(date +%s)
+  aws ec2 reboot-instances --instance-ids "$INSTANCE"
+  api_rebooted=""
+  while [ $(( $(date +%s) - T2 )) -lt 180 ]; do
+    console > "$LOG.api-reboot"
+    if grep -q '^DATA boot_count 3 ' "$LOG.api-reboot"; then api_rebooted=$(( $(date +%s) - T2 )); break; fi
+    sleep 5
+  done
+  # Asterinas: the kernel logs the press and sends SIGPWR; Linux: /init reads KEY_POWER from evdev.
+  grep -qE 'acpi: power button pressed|\[init\] power button \(evdev\)' "$LOG.api-reboot" && ok "power button seen: $(grep -m1 -E 'acpi: power button pressed|power button \(evdev\)' "$LOG.api-reboot" | sed 's/^\[kernel\] //; s/^\[init\] //')" || bad "no power button event in the console"
+  grep -q 'SIGTERM received' "$LOG.api-reboot" && ok "ERTS shut down on SIGTERM" || bad "no 'SIGTERM received' from ERTS"
+  grep -q '^\[init\] powering off' "$LOG.api-reboot" && ok "/init powered off" || bad "no '/init powering off'"
+  if [ -n "$api_rebooted" ]; then ok "reboot-instances: boot_count 3 on the console ${api_rebooted}s after the call (hard reset would take 240+ s)"; else bad "boot_count 3 not seen within 180 s of reboot-instances: $(grep -m1 '^DATA' "$LOG.api-reboot" || echo missing)"; fi
+
+  # EC2 API stop: the same button press; the guest must reach S5 for the
+  # instance to leave 'stopping' quickly.
+  echo "aws ec2 stop-instances $INSTANCE"
+  T3=$(date +%s)
+  aws ec2 stop-instances --instance-ids "$INSTANCE" >/dev/null
+  stopped=""
+  while [ $(( $(date +%s) - T3 )) -lt 240 ]; do
+    st=$(aws ec2 describe-instances --instance-ids "$INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text)
+    if [ "$st" = stopped ]; then stopped=$(( $(date +%s) - T3 )); break; fi
+    sleep 5
+  done
+  if [ -n "$stopped" ] && [ "$stopped" -lt 150 ]; then ok "stop-instances: state 'stopped' after ${stopped}s (hard stop would take 240+ s)"; else bad "stop-instances: state '${st}' after $(( $(date +%s) - T3 ))s"; fi
 fi
 
 echo "SMOKE $LABEL ($AMI on $INSTANCE_TYPE): $PASS passed, $FAIL failed"

@@ -26,6 +26,9 @@ CONFIG_ENA_ETHERNET=y
 CONFIG_BLK_DEV_NVME=y
 CONFIG_NVME_CORE=y
 CONFIG_PCI_MSI=y
+# ACPI power button (EC2 stop/reboot) as an input event for /init
+CONFIG_ACPI_BUTTON=y
+CONFIG_INPUT_EVDEV=y
 # UEFI boot via GRUB's linux command / EFI stub
 CONFIG_EFI=y
 CONFIG_EFI_STUB=y
