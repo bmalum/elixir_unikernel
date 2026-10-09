@@ -50,6 +50,8 @@
 | `DISK_MEM` | `256M` | guest RAM for the OVMF boot (GRUB needs more than the kernels) |
 | `OVMF` | auto-detected | path to `edk2-x86_64-code.fd` |
 | `AMI_FLAGS` | | extra flags for `ami-publish`, e.g. `--force` |
+| `ENA_ARGS` | | ENA driver knobs baked into the Asterinas disk, e.g. `ena.queues=auto` |
+| `HOST_PORT_HTTP` | 18088 | host side of the `/healthz` port forward |
 | `AWS_PROFILE`, `AWS_REGION` | from the environment | credentials and region for the EC2 targets |
 
 ## Files

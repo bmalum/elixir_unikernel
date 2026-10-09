@@ -108,20 +108,38 @@ defmodule Uniapp.Health do
   bytes per second, or nil. Measures the network stack and NIC driver
   loopback path, not the wire.
   """
-  def bench(bytes \\ 8 * 1024 * 1024) do
-    with {:ok, addr} <- nic_addr(),
+  def bench(bytes \\ 8 * 1024 * 1024), do: bench(nil, bytes)
+
+  @doc """
+  Like `bench/1` but against `peer` (an IP tuple or string), another node's
+  TCP echo on port 4000. Two instances in the same subnet give the real
+  NIC-to-NIC number, both directions. Prints `BENCH tcp_echo_peer ...`.
+  `uniapp.bench_peer=A.B.C.D` in user data runs it at boot.
+  """
+  def bench(peer, bytes) do
+    addr_result =
+      case peer do
+        nil -> nic_addr()
+        p when is_binary(p) -> :inet.parse_address(String.to_charlist(p))
+        p -> {:ok, p}
+      end
+
+    label = if peer, do: "tcp_echo_peer", else: "tcp_echo"
+
+    with {:ok, addr} <- addr_result,
          {:ok, sock} <- :gen_tcp.connect(addr, Uniapp.Application.echo_port(), [:binary, active: false, packet: 0, sndbuf: 1 <<< 20, recbuf: 1 <<< 20], 5_000) do
       line = :binary.copy(<<"x">>, 1023) <> "\n"
       n = div(bytes, byte_size(line))
       t0 = System.monotonic_time(:microsecond)
       sender = Task.async(fn -> Enum.each(1..n, fn _ -> :gen_tcp.send(sock, line) end) end)
       received = recv_all(sock, n * byte_size(line), 0)
-      Task.await(sender, 60_000)
       dt = System.monotonic_time(:microsecond) - t0
+      sent_ok = match?({:ok, _}, Task.yield(sender, 1_000)) or (Task.shutdown(sender, :brutal_kill) && false)
       :gen_tcp.close(sock)
       bps = div(received * 1_000_000, max(dt, 1))
-      :persistent_term.put({__MODULE__, :bench}, bps)
-      IO.puts("BENCH tcp_echo #{received} bytes in #{div(dt, 1000)} ms = #{div(bps, 1_000_000)} MB/s")
+      if peer == nil and received == n * byte_size(line), do: :persistent_term.put({__MODULE__, :bench}, bps)
+      status = if received == n * byte_size(line) and sent_ok, do: "", else: " (incomplete: #{received}/#{n * byte_size(line)} echoed)"
+      IO.puts("BENCH #{label} #{received} bytes in #{div(dt, 1000)} ms = #{div(bps, 1_000_000)} MB/s#{status}")
       {:ok, bps}
     else
       err -> {:error, err}
@@ -131,7 +149,7 @@ defmodule Uniapp.Health do
   defp recv_all(_sock, want, got) when got >= want, do: got
 
   defp recv_all(sock, want, got) do
-    case :gen_tcp.recv(sock, 0, 10_000) do
+    case :gen_tcp.recv(sock, 0, 5_000) do
       {:ok, data} -> recv_all(sock, want, got + byte_size(data))
       {:error, _} -> got
     end

@@ -11,7 +11,7 @@ index 084d49b4..cfeed537 100644
  aster-pci.workspace = true
  component.workspace = true
 diff --git a/kernel/core/comps/ena/src/admin.rs b/kernel/core/comps/ena/src/admin.rs
-index 69ad8d1c..a4e08a58 100644
+index 69ad8d1c..e684bd51 100644
 --- a/kernel/core/comps/ena/src/admin.rs
 +++ b/kernel/core/comps/ena/src/admin.rs
 @@ -13,7 +13,7 @@ use core::{
@@ -118,7 +118,7 @@ index 69ad8d1c..a4e08a58 100644
          };
          this.write_mmio_resp_addr();
          this.reset()?;
-@@ -162,6 +214,157 @@ impl AdminQueue {
+@@ -162,6 +214,159 @@ impl AdminQueue {
          Ok(this)
      }
  
@@ -235,6 +235,8 @@ index 69ad8d1c..a4e08a58 100644
 +    }
 +
 +    /// Reads `DEV_STS` and reports whether the device flagged a fatal error.
++    /// (Fatal errors arrive through the AENQ as well; this is for diagnostics.)
++    #[expect(dead_code)]
 +    pub(crate) fn fatal_error(&mut self) -> bool {
 +        let sts = self.read32(regs::DEV_STS);
 +        sts != regs::MMIO_READ_TIMEOUT && sts & regs::DEV_STS_FATAL_ERROR != 0
@@ -276,7 +278,7 @@ index 69ad8d1c..a4e08a58 100644
      fn write32(&self, off: usize, val: u32) {
          self.bar.write_once(off, val).unwrap();
      }
-@@ -270,7 +473,6 @@ impl AdminQueue {
+@@ -270,7 +475,6 @@ impl AdminQueue {
          self.write32(regs::AQ_CAPS, entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK));
          self.write32(regs::ACQ_CAPS, entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK));
  
@@ -284,7 +286,7 @@ index 69ad8d1c..a4e08a58 100644
          let (lo, hi) = mem_addr_words(self.aenq.daddr());
          self.write32(regs::AENQ_BASE_LO, lo);
          self.write32(regs::AENQ_BASE_HI, hi);
-@@ -329,6 +531,17 @@ impl AdminQueue {
+@@ -329,6 +533,17 @@ impl AdminQueue {
          }
      }
  
@@ -303,7 +305,7 @@ index 69ad8d1c..a4e08a58 100644
      pub(crate) fn get_feature(&mut self, feature_id: u8, version: u8) -> Result<[u32; 14], AdminError> {
          let mut cmd = AqEntry { opcode: OP_GET_FEATURE, ..Default::default() };
 diff --git a/kernel/core/comps/ena/src/device.rs b/kernel/core/comps/ena/src/device.rs
-index 07ce0dcb..88d1a6df 100644
+index 07ce0dcb..9bd591d6 100644
 --- a/kernel/core/comps/ena/src/device.rs
 +++ b/kernel/core/comps/ena/src/device.rs
 @@ -1,12 +1,13 @@
@@ -334,7 +336,7 @@ index 07ce0dcb..88d1a6df 100644
  };
  
  pub const DEVICE_NAME: &str = "ENA";
-@@ -36,15 +37,33 @@ const RX_BUFFER_LEN: usize = 4096;
+@@ -36,15 +37,35 @@ const RX_BUFFER_LEN: usize = 4096;
  pub(crate) const TX_BUFFER_LEN: usize = 4096;
  /// Link-layer MTU: 1500 bytes of IP plus the Ethernet header.
  const MTU: usize = 1514;
@@ -366,11 +368,13 @@ index 07ce0dcb..88d1a6df 100644
 +pub(crate) static TICK_MS: AtomicU64 = AtomicU64::new(0);
 +/// Set by the admin MSI-X vector: the AENQ has something to read.
 +pub(crate) static AENQ_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
++/// Set by the timer tick: run `tick()` on the next softirq poll.
++pub(crate) static TICK_DUE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 +
  #[derive(Debug)]
  #[expect(dead_code)] // the payloads are for `{:?}` in error messages
  pub(crate) enum EnaError {
-@@ -65,27 +84,74 @@ impl From<ostd::Error> for EnaError {
+@@ -65,27 +86,74 @@ impl From<ostd::Error> for EnaError {
      }
  }
  
@@ -453,7 +457,7 @@ index 07ce0dcb..88d1a6df 100644
  }
  
  #[derive(Default, Debug)]
-@@ -93,12 +159,27 @@ struct Stats {
+@@ -93,12 +161,27 @@ struct Stats {
      rx_packets: u64,
      tx_packets: u64,
      rx_dropped: u64,
@@ -484,7 +488,7 @@ index 07ce0dcb..88d1a6df 100644
          let attr = admin.get_feature(admin::FEAT_DEVICE_ATTRIBUTES, 0)?;
          let mac = EthernetAddress([
              attr[6] as u8,
-@@ -108,220 +189,661 @@ impl EnaDevice {
+@@ -108,220 +191,662 @@ impl EnaDevice {
              attr[7] as u8,
              (attr[7] >> 8) as u8,
          ]);
@@ -867,6 +871,13 @@ index 07ce0dcb..88d1a6df 100644
 -            if let Err(e) = self.add_rx_buffer(req_id) {
 -                ostd::error!("cannot refill rx slot {}: {:?}", req_id, e);
 -            }
++        // Health work runs here, in softirq context with the device lock
++        // held by the poller, never in the timer interrupt: a readless MMIO
++        // read or an admin command can take milliseconds (the device
++        // answers by DMA), which is fine in a softirq and fatal in an IRQ.
++        if TICK_DUE.swap(false, Ordering::AcqRel) {
++            self.tick();
++        }
 +        if let Some(why) = self.reset_pending.take() {
 +            self.reset(why);
 +            return Err(NetError::NotReady);
@@ -956,7 +967,7 @@ index 07ce0dcb..88d1a6df 100644
 +        reader.read(&mut ostd::mm::VmWriter::from(&mut hdr[..]));
 +        if hdr[12] != 0x08 || hdr[13] != 0x00 {
 +            return None; // not IPv4
-         }
++        }
 +        let ihl = ((hdr[14] & 0x0f) * 4) as usize;
 +        if hdr[14] >> 4 != 4 || ihl < 20 || hdr[20] & 0x3f != 0 || hdr[21] != 0 {
 +            return None; // bad header or a fragment
@@ -985,7 +996,7 @@ index 07ce0dcb..88d1a6df 100644
 +        sum += l4_len;
 +        while sum >> 16 != 0 {
 +            sum = (sum & 0xffff) + (sum >> 16);
-+        }
+         }
 +        let pseudo = (sum as u16).to_be_bytes();
 +        packet
 +            .data_writer(l4_off + csum_off, 2)
@@ -1095,10 +1106,10 @@ index 07ce0dcb..88d1a6df 100644
 +
 +    // ---------------------------------------------------------------- health
 +
-+    /// Called from the timer tick (every 100 ms, with the device lock held):
-+    /// drains the AENQ, watches the keep-alive and triggers a reset when the
-+    /// device is gone.
-+    pub(crate) fn tick(&mut self) {
++    /// Health work, every 100 ms (scheduled by the timer, run from the
++    /// softirq): drains the AENQ, watches the keep-alive, checks the data
++    /// path after a reset, and triggers a reset when the device is gone.
++    fn tick(&mut self) {
 +        AENQ_PENDING.store(false, Ordering::Relaxed);
 +        let now = TICK_MS.load(Ordering::Relaxed);
 +        // Post-reset liveness: the admin path comes back after a reset but on
@@ -1170,10 +1181,6 @@ index 07ce0dcb..88d1a6df 100644
 +            self.request_reset("keep-alive timeout");
 +            return;
 +        }
-+        if self.admin.fatal_error() {
-+            self.request_reset("DEV_STS fatal error");
-+            return;
-+        }
 +        if let Some(at) = self.test_reset_at_ms
 +            && now >= at
 +        {
@@ -1183,10 +1190,8 @@ index 07ce0dcb..88d1a6df 100644
 +        }
 +    }
 +
-+    /// Schedules a reset. `tick()` runs in the timer interrupt, where the
-+    /// admin-command busy waits and the Rx buffer allocations of a reset must
-+    /// not happen; the reset itself runs from the network softirq, in
-+    /// `receive()`, which `raise_receive_softirq` gets to run right away.
++    /// Schedules a reset for the next `receive()` (same softirq, but after the
++    /// AENQ loop has finished with its borrow of `self`).
 +    fn request_reset(&mut self, why: &'static str) {
 +        if self.reset_pending.is_none() {
 +            self.reset_pending = Some(why);
@@ -1245,12 +1250,14 @@ index 07ce0dcb..88d1a6df 100644
  }
  
  impl AnyNetworkDevice for EnaDevice {
-@@ -334,11 +856,11 @@ impl AnyNetworkDevice for EnaDevice {
+@@ -334,11 +859,13 @@ impl AnyNetworkDevice for EnaDevice {
      }
  
      fn can_receive(&self) -> bool {
 -        self.rx.cq.has_entry(3, 0)
-+        self.reset_pending.is_some() || self.rx.iter().any(|r| r.q.cq.has_entry(3, 0))
++        self.reset_pending.is_some()
++            || TICK_DUE.load(Ordering::Acquire)
++            || self.rx.iter().any(|r| r.q.cq.has_entry(3, 0))
      }
  
      fn can_send(&self) -> bool {
@@ -1259,7 +1266,7 @@ index 07ce0dcb..88d1a6df 100644
      }
  
      fn receive(&mut self) -> Result<RxPacket<LinkLayer>, NetError> {
-@@ -357,22 +879,32 @@ impl AnyNetworkDevice for EnaDevice {
+@@ -357,22 +884,32 @@ impl AnyNetworkDevice for EnaDevice {
      }
  
      fn free_processed_tx_buffers(&mut self) {
@@ -1302,7 +1309,7 @@ index 07ce0dcb..88d1a6df 100644
      }
  }
  
-@@ -380,11 +912,14 @@ impl Debug for EnaDevice {
+@@ -380,11 +917,14 @@ impl Debug for EnaDevice {
      fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
          f.debug_struct("EnaDevice")
              .field("mac", &self.mac)
@@ -1376,7 +1383,7 @@ index f2af1563..4cc62317 100644
  
      /// Writes `desc` at the tail and advances it (flipping the phase on wrap).
 diff --git a/kernel/core/comps/ena/src/lib.rs b/kernel/core/comps/ena/src/lib.rs
-index 98ed3cf1..87918323 100644
+index 98ed3cf1..568005bb 100644
 --- a/kernel/core/comps/ena/src/lib.rs
 +++ b/kernel/core/comps/ena/src/lib.rs
 @@ -3,12 +3,17 @@
@@ -1435,7 +1442,7 @@ index 98ed3cf1..87918323 100644
  
  #[init_component]
  fn ena_init() -> Result<(), ComponentInitError> {
-@@ -208,10 +225,19 @@ fn ena_init() -> Result<(), ComponentInitError> {
+@@ -208,10 +225,16 @@ fn ena_init() -> Result<(), ComponentInitError> {
      }
      if registered > 0 {
          ostd::timer::register_callback_on_cpu(|| {
@@ -1446,12 +1453,9 @@ index 98ed3cf1..87918323 100644
                  aster_network::raise_receive_softirq();
                  aster_network::raise_send_softirq();
              }
-+            if (t % HEALTH_DIVIDER == 0 || device::AENQ_PENDING.load(Ordering::Acquire))
-+                && let Some(dev) = aster_network::get_device(DEVICE_NAME)
-+                && let Some(mut guard) = dev.try_lock()
-+                && let Some(ena) = (&mut *guard as &mut dyn core::any::Any).downcast_mut::<EnaDevice>()
-+            {
-+                ena.tick();
++            if t % HEALTH_DIVIDER == 0 || device::AENQ_PENDING.load(Ordering::Acquire) {
++                device::TICK_DUE.store(true, Ordering::Release);
++                aster_network::raise_receive_softirq();
 +            }
          });
      }

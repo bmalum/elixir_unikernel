@@ -46,9 +46,10 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
 - Terminfo: `TERM=dumb`, no colours in IEx.
 - IPv6: untested. DHCP: IPv4 only, one lease per boot (renewals are handled
   by the kernel client on Asterinas; `/init` on Linux does not renew).
-- EC2: x86-64 Nitro instances with ENA only (tested on t3.small); one Rx/Tx
-  queue pair without offloads, so throughput is a fraction of what the
-  instance allows. One NVMe I/O queue. No IPv6.
+- EC2: x86-64 Nitro instances with ENA only (tested on t3.small). The ENA
+  driver has checksum offload and up to 8 queue pairs with RSS but no LLQ
+  or TSO; about 100 MB/s NIC to NIC with one pair. One NVMe I/O queue. No
+  IPv6.
 - Power: the ACPI power button and S5 work (EC2 stop/reboot/terminate);
   other ACPI events (sleep button, lid, thermal) are ignored.
 - Asterinas only: interface configuration from the command line (the address

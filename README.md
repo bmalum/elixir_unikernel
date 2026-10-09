@@ -40,9 +40,9 @@ While a VM runs, the guest's echo servers are reachable from the host:
 | Path | |
 |---|---|
 | `builder/Dockerfile` | static x86-64 OTP 29.1.1 + Elixir 1.20.4 + release; native build, ERTS cross-compiled with clang |
-| `builder/asterinas-patches/` | eight kernel patches: wildcard `bind()`, `timerfd` readiness, runtime `ifconfig` ioctls, in-kernel DHCP (`ip=dhcp`), the ENA driver, reboot/`clock_settime`, NVMe on EBS, ACPI power button and S5 |
+| `builder/asterinas-patches/` | nine kernel patches: wildcard `bind()`, `timerfd` readiness, runtime `ifconfig` ioctls, in-kernel DHCP (`ip=dhcp`), the ENA driver (queue pairs, RSS, checksum offload, keep-alive and reset), reboot/`clock_settime`, NVMe on EBS, ACPI power button and S5 |
 | `init/init.c` | PID 1: mount, DHCP or static NIC config, inetrc, IMDS user data, SNTP, data volume, supervise `beam.smp`, reboot on exit |
-| `app/` | sample release: TCP/UDP/TLS echo servers, DNS and TLS client probes |
+| `app/` | sample release: TCP/UDP/TLS echo servers, `/healthz`, DNS and TLS client probes, CloudWatch shipper |
 | `scripts/` | rootfs assembly, initramfs, kernel fetch/build, smoke test, dist bundle, disk image, AMI publish and EC2 smoke |
 | `docs/book/` | the manual (mdBook); `docs/RESEARCH.md` has the original research notes |
 | `site/` | landing page |
