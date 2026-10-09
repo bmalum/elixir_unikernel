@@ -34,8 +34,34 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   cleans stale untracked files first; previously it built silently without
   the failed patches.
 
+- `/init` is now a supervisor: it forks `beam.smp`, reaps orphans and on exit
+  reboots (or powers off/halts, `uniapp.on_exit=`) the machine, so a crashed
+  node restarts instead of hanging.
+- `/init` reads EC2 instance metadata and user data (`uniapp.imds=1`);
+  user-data `key=value` lines override the kernel command line. Identity in
+  `EC2_*`/`AWS_REGION`, raw user data in `/run/user-data`.
+- SNTP in `/init` (`uniapp.ntp=`, Amazon Time Sync by default on EC2): the
+  clock is set at boot and resynced hourly.
+- Data volume: `uniapp.data=auto` mounts an ext2 EBS volume at `/data`
+  (`UNIAPP_DATA`, `erl_crash.dump` there); `scripts/mkdata.sh` builds the
+  image, `scripts/ami-publish.py --snapshot-only` publishes it.
+- Sample app: `Uniapp.Cloudwatch` ships the log to CloudWatch Logs and
+  publishes EMF metrics (`BootCount`, `Uptime`, `MemoryTotal`,
+  `ProcessCount`) with SigV4 and instance-role credentials; `Uniapp.Data`
+  keeps a boot counter on `/data`.
+- Asterinas patch 0006: `reboot(2)` resets the machine on Nitro (triple
+  fault fallback), `poweroff` falls back to reset, `clock_settime` and
+  `settimeofday` implemented.
+- Asterinas patch 0007: NVMe honours `CAP.MQES` and issues Set Features
+  (Number of Queues), so EBS volumes work.
+- `scripts/smoke-ec2.sh` with `DATA_SNAPSHOT`: IAM role, data volume, user
+  data, guest-initiated reboot, boot counter and CloudWatch assertions
+  (18 in total); `make smoke-ec2` wires it up.
+
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.
+- `/init` no longer `exec`s `beam.smp`; the VM runs as PID 2 under the
+  supervisor. `ERL_CRASH_DUMP` points to `/data` when a volume is mounted.
 
 ## [0.1.0] - 2026-10-07
 

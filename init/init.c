@@ -12,6 +12,15 @@
  *   uniapp.mode=iex   (default)  boot into IEx
  *   uniapp.mode=app              boot straight into the application, -noshell
  *   uniapp.tls_host=example.com  enable the DNS + TLS client probes
+ *   uniapp.imds=1                EC2: read user data + identity from IMDSv2;
+ *                                user-data lines "key=value" override cmdline keys
+ *   uniapp.ntp=A.B.C.D|off       SNTP server (default: Amazon Time Sync when imds=1)
+ *   uniapp.data=auto|/dev/X|off  mount an ext2 data volume at /data (auto: 2nd NVMe)
+ *   uniapp.on_exit=reboot|poweroff|halt   what to do when beam.smp exits (default reboot)
+ *
+ * /init stays PID 1 as a supervisor: it forks beam.smp, reaps orphans, resyncs
+ * the clock hourly and reboots (or powers off) the machine when the VM exits,
+ * so a crashed node is replaced by its auto-scaling group instead of hanging.
  *
  * Statically linked against musl; no libc beyond what musl provides.
  */
@@ -55,7 +64,7 @@
 #error "ERTS_VSN must be defined (e.g. -DERTS_VSN=\"17.1.1\")"
 #endif
 
-static char cmdline[4096];
+static char cmdline[8192];
 
 static void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void logmsg(const char *fmt, ...) {
@@ -411,6 +420,216 @@ static void setup_inetrc(void) {
     write_file("/etc/hosts", "127.0.0.1 localhost\n");
 }
 
+/* ------------------------------------------------------------------ IMDSv2
+ * Minimal HTTP/1.1 over TCP to 169.254.169.254 (no TLS). Returns the body
+ * (heap, NUL-terminated) or NULL. `token` may be NULL for the token request. */
+static char *imds_http(const char *method, const char *path, const char *token, const char *ttl_hdr, int timeout_ms) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return NULL;
+    struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80) };
+    inet_pton(AF_INET, "169.254.169.254", &a.sin_addr);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return NULL; }
+    char req[1024];
+    int n = snprintf(req, sizeof req,
+        "%s %s HTTP/1.1\r\nHost: 169.254.169.254\r\nConnection: close\r\n%s%s%s%s\r\n",
+        method, path,
+        ttl_hdr ? ttl_hdr : "", ttl_hdr ? "\r\n" : "",
+        token ? "X-aws-ec2-metadata-token: " : "", token ? token : "");
+    if (token) { strncat(req, "\r\n", sizeof req - strlen(req) - 1); n = strlen(req); }
+    if (write(s, req, n) != n) { close(s); return NULL; }
+    size_t cap = 65536, len = 0; char *buf = malloc(cap);
+    for (;;) {
+        if (len + 1 >= cap) break;
+        ssize_t r = read(s, buf + len, cap - 1 - len);
+        if (r <= 0) break;
+        len += r;
+    }
+    close(s);
+    buf[len] = 0;
+    int code = 0; if (sscanf(buf, "HTTP/1.%*d %d", &code) != 1 || code != 200) { free(buf); return NULL; }
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) { free(buf); return NULL; }
+    body += 4;
+    char *out = strdup(body); free(buf);
+    return out;
+}
+
+static char *g_imds_token;
+
+static char *imds_get(const char *path) {
+    if (!g_imds_token) return NULL;
+    char full[256]; snprintf(full, sizeof full, "/latest/%s", path);
+    return imds_http("GET", full, g_imds_token, NULL, 2000);
+}
+
+/* Fetches user data and identity. User-data lines of the form key=value (no
+   spaces around '=', '#' comments) are appended to the kernel command line so
+   that param() sees them; later keys win over earlier ones only if param() is
+   changed to search from the end, so we prepend instead. */
+static void setup_imds(void) {
+    const char *v = param("uniapp.imds");
+    if (!v || !strcmp(v, "0") || !strcmp(v, "off")) return;
+    for (int i = 0; i < 10 && !g_imds_token; i++) {
+        g_imds_token = imds_http("PUT", "/latest/api/token", NULL, "X-aws-ec2-metadata-token-ttl-seconds: 21600", 1500);
+        if (!g_imds_token) usleep(500 * 1000);
+    }
+    if (!g_imds_token) { logmsg("imds: no answer from 169.254.169.254; continuing without"); return; }
+    char *nl = strpbrk(g_imds_token, "\r\n"); if (nl) *nl = 0;
+    char *id = imds_get("meta-data/instance-id");
+    char *region = imds_get("meta-data/placement/region");
+    char *az = imds_get("meta-data/placement/availability-zone");
+    char *itype = imds_get("meta-data/instance-type");
+    if (id) setenv("EC2_INSTANCE_ID", id, 1);
+    if (region) setenv("AWS_REGION", region, 1), setenv("AWS_DEFAULT_REGION", region, 1);
+    if (az) setenv("EC2_AVAILABILITY_ZONE", az, 1);
+    if (itype) setenv("EC2_INSTANCE_TYPE", itype, 1);
+    setenv("EC2_IMDS_TOKEN", g_imds_token, 1);
+    logmsg("imds: %s %s in %s", id ? id : "?", itype ? itype : "?", az ? az : "?");
+
+    char *ud = imds_get("user-data");
+    if (!ud) { logmsg("imds: no user data"); return; }
+    mkdir("/run", 0755);
+    write_file("/run/user-data", ud);
+    /* Collect key=value lines and prepend them to the command line: param()
+       returns the first match, so user data overrides the baked-in values. */
+    char overrides[4096] = ""; int count = 0;
+    for (char *line = strtok(ud, "\n"); line; line = strtok(NULL, "\n")) {
+        while (*line == ' ' || *line == '\t') line++;
+        size_t l = strlen(line); while (l && (line[l-1] == '\r' || line[l-1] == ' ')) line[--l] = 0;
+        if (!*line || *line == '#') continue;
+        char *eq = strchr(line, '=');
+        if (!eq || eq == line) continue;
+        char *sp = strchr(line, ' ');
+        if (sp && sp < eq) continue;            /* "foo bar=1" is not a key */
+        if (strlen(overrides) + l + 2 >= sizeof overrides) break;
+        strcat(overrides, line); strcat(overrides, " "); count++;
+    }
+    if (count) {
+        char merged[sizeof cmdline];
+        snprintf(merged, sizeof merged, "%s%s", overrides, cmdline);
+        strcpy(cmdline, merged);
+        logmsg("imds: %d user-data override%s applied", count, count == 1 ? "" : "s");
+    }
+}
+
+/* ------------------------------------------------------------------ SNTP
+ * One RFC 4330 exchange; sets CLOCK_REALTIME. Returns the correction in ms or
+ * INT64_MIN on failure. */
+static int64_t sntp_sync(const char *server) {
+    struct in_addr a; if (inet_pton(AF_INET, server, &a) != 1) return INT64_MIN;
+    int s = socket(AF_INET, SOCK_DGRAM, 0); if (s < 0) return INT64_MIN;
+    struct timeval tv = { .tv_sec = 2 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    struct sockaddr_in d = { .sin_family = AF_INET, .sin_port = htons(123), .sin_addr = a };
+    uint8_t pkt[48] = { 0x23 };                       /* LI 0, VN 4, mode 3 (client) */
+    struct timespec t1; clock_gettime(CLOCK_REALTIME, &t1);
+    uint32_t tx_sec = htonl((uint32_t)t1.tv_sec + 2208988800u);
+    memcpy(pkt + 40, &tx_sec, 4);
+    if (sendto(s, pkt, sizeof pkt, 0, (struct sockaddr *)&d, sizeof d) != (ssize_t)sizeof pkt) { close(s); return INT64_MIN; }
+    uint8_t resp[48]; ssize_t n = recv(s, resp, sizeof resp, 0); close(s);
+    if (n < 48 || (resp[0] & 7) != 4) return INT64_MIN;  /* mode 4 = server */
+    struct timespec t4; clock_gettime(CLOCK_REALTIME, &t4);
+    uint32_t sec, frac;
+    memcpy(&sec, resp + 32, 4); memcpy(&frac, resp + 36, 4);   /* receive timestamp */
+    double t2 = (double)ntohl(sec) - 2208988800.0 + (double)ntohl(frac) / 4294967296.0;
+    memcpy(&sec, resp + 40, 4); memcpy(&frac, resp + 44, 4);   /* transmit timestamp */
+    double t3 = (double)ntohl(sec) - 2208988800.0 + (double)ntohl(frac) / 4294967296.0;
+    double c1 = t1.tv_sec + t1.tv_nsec / 1e9, c4 = t4.tv_sec + t4.tv_nsec / 1e9;
+    double offset = ((t2 - c1) + (t3 - c4)) / 2;
+    double now = c4 + offset;
+    struct timespec set = { .tv_sec = (time_t)now, .tv_nsec = (long)((now - (time_t)now) * 1e9) };
+    if (clock_settime(CLOCK_REALTIME, &set) < 0) { logmsg("ntp: clock_settime: %s", strerror(errno)); return INT64_MIN; }
+    return (int64_t)(offset * 1000);
+}
+
+static const char *g_ntp;   /* server or NULL */
+
+static void setup_time(void) {
+    const char *v = param("uniapp.ntp");
+    if (v && (!strcmp(v, "off") || !strcmp(v, "0"))) return;
+    if (!v) { if (!g_imds_token) return; v = "169.254.169.123"; }   /* Amazon Time Sync */
+    g_ntp = v;
+    for (int i = 0; i < 3; i++) {
+        int64_t ms = sntp_sync(v);
+        if (ms != INT64_MIN) {
+            time_t now = time(NULL); char buf[32]; strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
+            logmsg("ntp: synced to %s, correction %lld ms, now %s", v, (long long)ms, buf);
+            return;
+        }
+    }
+    logmsg("ntp: %s did not answer; keeping the firmware clock", v);
+}
+
+/* ------------------------------------------------------------------ data volume */
+static int g_data_mounted;
+
+static int try_mount_data(const char *dev) {
+    mkdir("/data", 0755);
+    if (mount(dev, "/data", "ext2", 0, NULL) == 0) {
+        logmsg("data: %s mounted on /data (ext2, rw)", dev);
+        g_data_mounted = 1;
+        return 0;
+    }
+    return -1;
+}
+
+static void setup_data(void) {
+    const char *v = param("uniapp.data");
+    if (!v || !strcmp(v, "off")) return;
+    if (strcmp(v, "auto")) {
+        if (try_mount_data(v) < 0) logmsg("data: mount %s: %s", v, strerror(errno));
+        return;
+    }
+    /* auto: the first block device that mounts as ext2. On EC2 the root volume
+       is nvme0n1 (GPT + FAT, not ext2, so the mount fails harmlessly) and a data
+       volume attached as /dev/sdf shows up as nvme1n1; under QEMU with a direct
+       kernel boot the data drive is the only NVMe and is nvme0n1. */
+    const char *cands[] = { "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1", "/dev/vdb", "/dev/vdc", "/dev/nvme0n1", "/dev/vda", NULL };
+    for (int attempt = 0; attempt < 20 && !g_data_mounted; attempt++) {
+        for (int i = 0; cands[i]; i++) {
+            if (access(cands[i], F_OK) < 0) continue;
+            if (try_mount_data(cands[i]) == 0) return;
+            if (errno != EINVAL) logmsg("data: mount %s: %s", cands[i], strerror(errno));
+        }
+        if (attempt == 0) logmsg("data: waiting for a data volume");
+        usleep(250 * 1000);
+    }
+    if (!g_data_mounted) logmsg("data: no ext2 data volume found; /data unavailable");
+}
+
+/* ------------------------------------------------------------------ supervisor */
+static void power_action(const char *what) {
+    sync();
+    if (g_data_mounted) umount("/data");
+    if (!strcmp(what, "poweroff")) { logmsg("powering off"); reboot(RB_POWER_OFF); }
+    else if (!strcmp(what, "halt")) { logmsg("halting"); reboot(RB_HALT_SYSTEM); for (;;) pause(); }
+    else { logmsg("rebooting"); reboot(RB_AUTOBOOT); }
+    logmsg("reboot(2) returned: %s", strerror(errno));
+    for (;;) pause();
+}
+
+/* Waits for `child` while reaping any other orphans, resyncing the clock once
+   an hour. Returns when `child` has exited. */
+static void supervise(pid_t child, int *status) {
+    time_t last_sync = time(NULL);
+    for (;;) {
+        int st; pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p == child) { *status = st; return; }
+        if (p < 0 && errno == ECHILD) { *status = 0; return; }
+        if (p == 0) {
+            sleep(1);
+            if (g_ntp && time(NULL) - last_sync >= 3600) {
+                int64_t ms = sntp_sync(g_ntp);
+                if (ms != INT64_MIN && (ms > 50 || ms < -50)) logmsg("ntp: correction %lld ms", (long long)ms);
+                last_sync = time(NULL);
+            }
+        }
+    }
+}
+
 int main(void) {
     mount_fs("proc", "/proc", "proc");
     mount_fs("devtmpfs", "/dev", "devtmpfs");
@@ -423,6 +642,9 @@ int main(void) {
 
     setup_net();
     setup_inetrc();
+    setup_imds();
+    setup_time();
+    setup_data();
 
     const char *mode = param("uniapp.mode");
     if (!mode) mode = "iex";
@@ -455,8 +677,9 @@ int main(void) {
     setenv("RELEASE_MODE", embedded ? "embedded" : "interactive", 1);
     setenv("RELEASE_NODE", RELEASE_NAME, 1);
     setenv("RELEASE_SYS_CONFIG", sysconfig, 1);
-    setenv("ERL_CRASH_DUMP", "/dev/null", 1);
+    setenv("ERL_CRASH_DUMP", g_data_mounted ? "/data/erl_crash.dump" : "/dev/null", 1);
     setenv("KERNEL_CMDLINE", cmdline, 1);
+    if (g_data_mounted) setenv("UNIAPP_DATA", "/data", 1);
 
     static char beam[256];
     snprintf(beam, sizeof beam, "%s/beam.smp", bindir);
@@ -496,12 +719,25 @@ int main(void) {
     }
     argv[n] = NULL;
 
-    logmsg("exec %s (%s mode)", beam, mode);
+    const char *on_exit = param("uniapp.on_exit");
+    if (!on_exit) on_exit = "reboot";
+    logmsg("exec %s (%s mode, on exit: %s)", beam, mode, on_exit);
 
-    /* exec keeps us PID 1. ERTS reaps its own erl_child_setup. */
-    execv(beam, (char *const *)argv);
-    logmsg("execv %s: %s", beam, strerror(errno));
-    sleep(5);
-    reboot(RB_POWER_OFF);
+    pid_t child = fork();
+    if (child < 0) { logmsg("fork: %s", strerror(errno)); power_action(on_exit); }
+    if (child == 0) {
+        /* The VM owns the console; ERTS reaps its own erl_child_setup. */
+        setsid();
+        execv(beam, (char *const *)argv);
+        logmsg("execv %s: %s", beam, strerror(errno));
+        _exit(127);
+    }
+    close(0);
+    int status = 0;
+    supervise(child, &status);
+    if (WIFEXITED(status)) logmsg("beam.smp exited with status %d", WEXITSTATUS(status));
+    else if (WIFSIGNALED(status)) logmsg("beam.smp killed by signal %d", WTERMSIG(status));
+    else logmsg("beam.smp ended (status %#x)", status);
+    power_action(on_exit);
     return 1;
 }

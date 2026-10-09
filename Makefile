@@ -145,8 +145,9 @@ KERNEL      ?= asterinas
 DISK_MODE   ?= app
 DISK        := $(BUILD)/disk-$(KERNEL)$(if $(filter-out app,$(DISK_MODE)),-$(DISK_MODE),).raw
 OVMF        ?= $(firstword $(wildcard /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd))
-DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp
-DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init
+# uniapp.imds=1: read user data and identity from the instance metadata service.
+DISK_CMDLINE_asterinas = console=ttyS0 earlycon loglevel=$(DISK_LOGLEVEL) ip=dhcp uniapp.imds=1
+DISK_CMDLINE_linux     = console=ttyS0 quiet loglevel=3 rdinit=/init uniapp.imds=1
 DISK_KERNEL_asterinas  = $(KERNEL_M1)
 DISK_KERNEL_linux      = $(BUILD)/vmlinux-ec2
 
@@ -186,16 +187,28 @@ AMI_NAME = elixir_unikernel-$(VERSION)-$(KERNEL)$(if $(filter-out app,$(DISK_MOD
 ami-publish: $(DISK)
 	scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)
 
-## smoke-ec2:   publish (or reuse) the AMI, boot a t3.small, run the assertions, terminate
-smoke-ec2: $(DISK)
+## data:        empty ext2 data volume image (64 MB) -> build/data.raw
+DATA_IMG := $(BUILD)/data.raw
+data: $(DATA_IMG)
+$(DATA_IMG): scripts/mkdata.sh
+	scripts/mkdata.sh $@ 64
+
+## smoke-ec2:   publish (or reuse) the AMI and the data snapshot, boot a t3.small with a data
+##              volume and an IAM role, run the assertions incl. reboot and CloudWatch, terminate
+smoke-ec2: $(DISK) $(DATA_IMG)
+	DATA_SNAPSHOT=$$(scripts/ami-publish.py $(DATA_IMG) --name elixir_unikernel-$(VERSION)-data --version $(VERSION) --kernel $(KERNEL) --snapshot-only) \
 	scripts/smoke-ec2.sh $$(scripts/ami-publish.py $(DISK) --name $(AMI_NAME) --version $(VERSION) --kernel $(KERNEL) $(AMI_FLAGS)) $(KERNEL)
 
-## ami-clean:   deregister this version's AMIs (all kernels and modes) and delete their snapshots
+## ami-clean:   deregister this version's AMIs (all kernels and modes) and delete their snapshots,
+##              incl. the data snapshot. The IAM role elixir_unikernel-smoke is kept (free, reusable).
 ami-clean:
 	@for ami in $$(aws ec2 describe-images --owners self --filters "Name=name,Values=elixir_unikernel-$(VERSION)-*" --query 'Images[].ImageId' --output text); do \
 	  snaps=$$(aws ec2 describe-images --image-ids $$ami --query 'Images[0].BlockDeviceMappings[].Ebs.SnapshotId' --output text); \
 	  aws ec2 deregister-image --image-id $$ami >/dev/null && echo "deregistered $$ami"; \
 	  for s in $$snaps; do aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s"; done; \
+	done; \
+	for s in $$(aws ec2 describe-snapshots --owner-ids self --filters "Name=tag:Name,Values=elixir_unikernel-$(VERSION)-data" --query 'Snapshots[].SnapshotId' --output text); do \
+	  aws ec2 delete-snapshot --snapshot-id $$s && echo "deleted $$s (data)"; \
 	done; \
 	left=$$(aws ec2 describe-instances --filters Name=tag:Project,Values=elixir_unikernel Name=instance-state-name,Values=pending,running,stopping,stopped --query 'Reservations[].Instances[].InstanceId' --output text); \
 	[ -z "$$left" ] && echo "no live instances tagged Project=elixir_unikernel" || echo "WARNING: live instances: $$left"

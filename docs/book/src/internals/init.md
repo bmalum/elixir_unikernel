@@ -19,13 +19,31 @@ replaces the release's shell script, `erlexec`, and an init system.
 4. Write `/etc/inetrc` (`{lookup,[file,dns]}`, so OTP never looks for
    `inet_gethost`), `/etc/resolv.conf` (the nameserver; `inet_db` reads this
    file and clears nameservers if it is missing) and `/etc/hosts`.
-5. Export the environment: `ROOTDIR`, `BINDIR` (ERTS uses it to locate
+5. EC2 (`uniapp.imds=1`): fetch an IMDSv2 token, instance id, region,
+   availability zone and type; fetch user data, save it to `/run/user-data`
+   and prepend its `key=value` lines to the command line so that `param()`
+   finds them first.
+6. Time (`uniapp.ntp`): one SNTP exchange against Amazon Time Sync
+   (169.254.169.123) or the given server, then `clock_settime`. On Nitro the
+   firmware clock has been 0.4 to 2.7 s off at boot.
+7. Data volume (`uniapp.data`): mount an ext2 volume read-write on `/data`,
+   retrying for 5 s while the block device appears. ext2 is what the Asterinas
+   kernel mounts; `scripts/mkdata.sh` makes a suitable image (4 KiB blocks,
+   no `dir_index`).
+8. Export the environment: `ROOTDIR`, `BINDIR` (ERTS uses it to locate
    `erl_child_setup`; a missing `BINDIR` is fatal), `EMU`, `PROGNAME`,
    `HOME`, `LANG=C.UTF-8`, `TERM=dumb`, `RELEASE_ROOT`, `RELEASE_NAME`,
    `RELEASE_VSN`, `RELEASE_MODE`, `RELEASE_NODE`, `RELEASE_SYS_CONFIG`,
-   `ERL_CRASH_DUMP=/dev/null`, `KERNEL_CMDLINE`.
-6. Build the argument vector and `execv` `beam.smp`. If `exec` fails, log,
-   sleep 5 s, power off.
+   `ERL_CRASH_DUMP` (`/data/erl_crash.dump` when a data volume is mounted,
+   else `/dev/null`), `KERNEL_CMDLINE`, `UNIAPP_DATA`, `EC2_*`,
+   `AWS_REGION`, `EC2_IMDS_TOKEN`.
+9. Build the argument vector, `fork` and `execv` `beam.smp` in the child.
+   `/init` stays PID 1 as a supervisor: it reaps orphans, resyncs the clock
+   every hour, and when the VM exits it logs the status, unmounts `/data`
+   and performs `uniapp.on_exit` (default `reboot(RB_AUTOBOOT)`). The
+   kernel's restart path (patch 0006) then resets the machine; on EC2 the
+   same AMI boots again, which is how a crashed node heals under an
+   auto-scaling group.
 
 ## The argument vector
 

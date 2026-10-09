@@ -72,6 +72,18 @@ address between connections), launches one `t3.small` (`INSTANCE_TYPE`) in
 the default VPC, polls `GetConsoleOutput` for `uniapp starting` (limit
 `BOOT_TIMEOUT`, default 120 s), echoes through TCP 4000 and TLS 1.3 4443
 from the internet and checks the `PROBE dns ok` and `PROBE tls ok` lines.
+With a data snapshot (`make smoke-ec2` builds one from `scripts/mkdata.sh`
+and passes it as `DATA_SNAPSHOT`) the launch also gets a 1 GiB EBS data
+volume on `/dev/sdf`, the IAM role `elixir_unikernel-smoke` (created on first
+use; CloudWatch Logs permissions only) and user data that turns on
+`uniapp.cloudwatch=1`, `uniapp.data=auto` and a VM exit 75 s after boot. The
+script then checks ten more things: IMDS identity, user-data overrides, NTP
+sync, `/data` mounted, `boot_count 1`, the CloudWatch shipper, the
+guest-initiated reboot, `boot_count 2` on the second boot, log events in
+`/elixir_unikernel/smoke/<instance-id>` and the `BootCount` EMF document.
+Both kernels pass all 18 (Asterinas `ami-041b91c02aeffebe1`, Linux
+`ami-057a7b81c6d39f539`).
+
 `KEEP=1` leaves the instance running. The console is saved to
 `build/logs/ec2-<label>.log`.
 
@@ -122,14 +134,38 @@ aws ec2 describe-instances --filters Name=tag:Project,Values=elixir_unikernel \
 A `t3.small` costs about 18 USD per month if left running; the snapshot of
 a 1 GiB volume is cents.
 
+## Operating it
+
+- **Configuration** comes from EC2 user data, not from rebuilding the AMI:
+  plain `key=value` lines (`uniapp.mode=iex`, `uniapp.log_group=/prod/web`,
+  anything the [command line](../reference/cmdline.md) accepts). `/init`
+  fetches it over IMDSv2 and the raw text is at `/run/user-data` for the
+  application.
+- **Crashes** restart the instance: when the VM exits, `/init` reboots the
+  machine and the AMI boots again (about 45 s). Set `uniapp.on_exit=poweroff`
+  with `--instance-initiated-shutdown-behavior terminate` if the ASG should
+  replace the instance instead.
+- **State** lives on an EBS volume mounted at `/data` (`uniapp.data=auto`),
+  ext2, so write small files and `fsync`. `scripts/mkdata.sh` makes an empty
+  image, `scripts/ami-publish.py --snapshot-only` turns it into a snapshot to
+  launch from. `erl_crash.dump` lands there too.
+- **Logs and metrics** go to CloudWatch from inside the BEAM
+  (`uniapp.cloudwatch=1`, instance role with `logs:*` on the group): every
+  `Logger` event is batched into `PutLogEvents`, metrics are EMF documents in
+  the same stream. Nothing else runs on the instance, so this is the only
+  telemetry path; use it as the model for your own application.
+- **Time** is set from Amazon Time Sync at boot and hourly.
+
 ## What does not work yet
 
 - Only one ENA queue pair, no LLQ, no checksum offload; see the
   [ENA driver notes](../internals/asterinas-patches.md#0005-the-ena-network-driver).
-- Asterinas's NVMe driver fails its first admin command on Nitro
-  (`nvme: Device initialization error: Err(CommandFailed)`). The image does
-  not need the block device, since GRUB loads the initramfs as a multiboot
-  module, but it means no persistent volume on Asterinas for now.
-- Instance metadata (169.254.169.254), cloud-init style user data and IPv6
-  are not used. Graviton (arm64), Xen-based instance types and Marketplace
-  publishing are out of scope.
+- Asterinas's NVMe driver needs patch 0007 to talk to EBS (the controller
+  reports 32 queue entries and rejects larger queues); it has one I/O queue
+  and no interrupts tuning, fine for a boot counter and crash dumps, not for
+  a database.
+- `aws ec2 reboot-instances` and `stop-instances` send ACPI events the kernel
+  ignores; EC2 falls back to a hard reset after a few minutes. Reboots
+  initiated from the guest work.
+- IPv6 is not used. Graviton (arm64), Xen-based instance types and
+  Marketplace publishing are out of scope.
