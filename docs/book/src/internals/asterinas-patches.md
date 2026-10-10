@@ -302,7 +302,15 @@ patch.
 ## Reporting upstream
 
 The patches are `git diff` output against `3d85cb4`, apply in order with
-`git apply`, and each depends on the previous ones. 0005 is a new crate
+`git apply`, and some depend on earlier ones (0004 on 0003, 0005 and 0009
+on 0003/0004, 0008 on 0006). `scripts/upstream-branches.sh` turns them into
+commits on the fork `github.com/bmalum/asterinas`, one topic branch per
+upstreamable unit (`fix/bind-unspecified-address`,
+`fix/timerfd-settime-readiness`, `feat/net-runtime-ifconfig-dhcp`,
+`feat/ena-driver`, `feat/x86-poweroff-clock-settime`,
+`fix/nvme-mqes-number-of-queues`, `feat/acpi-power-button-s5`) plus
+`elixir-unikernel-all`; the commit messages are these sections. Open the
+pull requests from those branches. 0005 is a new crate
 rather than a fix and would go upstream as a pull request adding
 `kernel/core/comps/ena` plus the two-driver selection in `iface/init.rs`. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
