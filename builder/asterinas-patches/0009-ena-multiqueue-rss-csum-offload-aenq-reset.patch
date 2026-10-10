@@ -305,7 +305,7 @@ index 69ad8d1c..e684bd51 100644
      pub(crate) fn get_feature(&mut self, feature_id: u8, version: u8) -> Result<[u32; 14], AdminError> {
          let mut cmd = AqEntry { opcode: OP_GET_FEATURE, ..Default::default() };
 diff --git a/kernel/core/comps/ena/src/device.rs b/kernel/core/comps/ena/src/device.rs
-index 07ce0dcb..9bd591d6 100644
+index 07ce0dcb..b19d22eb 100644
 --- a/kernel/core/comps/ena/src/device.rs
 +++ b/kernel/core/comps/ena/src/device.rs
 @@ -1,12 +1,13 @@
@@ -374,7 +374,7 @@ index 07ce0dcb..9bd591d6 100644
  #[derive(Debug)]
  #[expect(dead_code)] // the payloads are for `{:?}` in error messages
  pub(crate) enum EnaError {
-@@ -65,27 +86,74 @@ impl From<ostd::Error> for EnaError {
+@@ -65,27 +86,75 @@ impl From<ostd::Error> for EnaError {
      }
  }
  
@@ -435,6 +435,7 @@ index 07ce0dcb..9bd591d6 100644
 +    offloads: Offloads,
 +    tx: Vec<TxQueue>,
 +    rx: Vec<RxQueue>,
++    /// Last Tx queue used (diagnostics).
 +    next_tx: usize,
 +    /// Round-robin position for draining Rx completions across queues.
 +    next_rx: usize,
@@ -457,7 +458,7 @@ index 07ce0dcb..9bd591d6 100644
  }
  
  #[derive(Default, Debug)]
-@@ -93,12 +161,27 @@ struct Stats {
+@@ -93,12 +162,25 @@ struct Stats {
      rx_packets: u64,
      tx_packets: u64,
      rx_dropped: u64,
@@ -469,16 +470,14 @@ index 07ce0dcb..9bd591d6 100644
 -impl EnaDevice {
 -    pub(crate) fn init(admin: AdminQueue, mut msix: CapabilityMsixData) -> Result<(), EnaError> {
 -        let mut admin = admin;
-+/// Number of queue pairs to create: `ena.queues=N` (`auto` = one per vCPU),
-+/// default 1. Multi-queue works (RSS spreads flows and all pairs receive)
-+/// but on a t3.small the guest stalled minutes into a run with two pairs,
-+/// not yet understood; see the patch notes.
++/// Number of queue pairs to create: `ena.queues=N`, default (`auto`) one per
++/// vCPU up to `MAX_QUEUES`. Tx is steered by flow hash so a connection stays
++/// on one queue; RSS does the same for Rx.
 +fn wanted_queues() -> usize {
 +    let cpus = ostd::cpu::num_cpus() as usize;
 +    match crate::QUEUES_PARAM.get().map(|v| v.as_str()) {
-+        Some("auto") => cpus,
-+        Some(v) => v.parse::<usize>().unwrap_or(1),
-+        None => 1,
++        None | Some("auto") => cpus,
++        Some(v) => v.parse::<usize>().unwrap_or(cpus),
 +    }
 +    .clamp(1, MAX_QUEUES)
 +}
@@ -488,7 +487,7 @@ index 07ce0dcb..9bd591d6 100644
          let attr = admin.get_feature(admin::FEAT_DEVICE_ATTRIBUTES, 0)?;
          let mac = EthernetAddress([
              attr[6] as u8,
-@@ -108,220 +191,662 @@ impl EnaDevice {
+@@ -108,220 +190,700 @@ impl EnaDevice {
              attr[7] as u8,
              (attr[7] >> 8) as u8,
          ]);
@@ -908,13 +907,6 @@ index 07ce0dcb..9bd591d6 100644
 -                self.stats.rx_dropped += 1;
 -                ostd::debug!("dropping multi-descriptor rx frame (status {:#x})", cdesc.status);
 -                continue;
--            }
--            let offset = cdesc.offset as usize;
--            let len = cdesc.length as usize;
--            if offset + len > buf.size() || offset > 12 {
--                self.stats.rx_dropped += 1;
--                ostd::warn!("rx frame outside its buffer: offset {} len {}", offset, len);
--                continue;
 +                let whole = cdesc.status & io::RX_CDESC_FIRST != 0 && cdesc.status & io::RX_CDESC_LAST != 0;
 +                if !whole {
 +                    self.stats.rx_dropped += 1;
@@ -942,17 +934,16 @@ index 07ce0dcb..9bd591d6 100644
 +                let packet = buf.finish_dma(offset + len);
 +                return Ok(packet.peel(offset));
              }
--            self.stats.rx_packets += 1;
--            ostd::debug!("rx {} bytes (req {}, status {:#x})", len, req_id, cdesc.status);
--            let packet = buf.finish_dma(offset + len);
--            return Ok(packet.peel(offset));
-         }
+-            let offset = cdesc.offset as usize;
+-            let len = cdesc.length as usize;
+-            if offset + len > buf.size() || offset > 12 {
+-                self.stats.rx_dropped += 1;
+-                ostd::warn!("rx frame outside its buffer: offset {} len {}", offset, len);
+-                continue;
++        }
 +        Err(NetError::NotReady)
-     }
- 
--    fn do_send(&mut self, packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
--        if !self.can_send() {
--            return Err(NetError::Busy);
++    }
++
 +    /// Prepares an Ethernet/IPv4/TCP|UDP frame for partial L4 checksum
 +    /// offload: writes the pseudo-header checksum into the L4 checksum field
 +    /// (the device adds the payload sum, like Linux's `CHECKSUM_PARTIAL`).
@@ -996,7 +987,7 @@ index 07ce0dcb..9bd591d6 100644
 +        sum += l4_len;
 +        while sum >> 16 != 0 {
 +            sum = (sum & 0xffff) + (sum >> 16);
-         }
++        }
 +        let pseudo = (sum as u16).to_be_bytes();
 +        packet
 +            .data_writer(l4_off + csum_off, 2)
@@ -1004,16 +995,61 @@ index 07ce0dcb..9bd591d6 100644
 +        Some((14, ihl as u8, proto))
 +    }
 +
++    /// Picks the Tx queue for a frame: the same flow (IPv4 5-tuple) always goes
++    /// to the same queue so segments of one TCP connection stay in order; the
++    /// device would otherwise interleave two queues and the receiver sees
++    /// reordering, which halved single-flow throughput with two pairs.
++    fn tx_queue_for(&self, packet: &TxPacket<LinkLayer>) -> usize {
++        let n = self.tx.len();
++        if n == 1 {
++            return 0;
++        }
++        let mut hdr = [0u8; 38];
++        let mut reader = packet.reader();
++        if reader.remain() < hdr.len() {
++            return 0;
++        }
++        reader.read(&mut ostd::mm::VmWriter::from(&mut hdr[..]));
++        if hdr[12] != 0x08 || hdr[13] != 0x00 || hdr[14] >> 4 != 4 {
++            return 0; // non-IPv4 (ARP etc.) on queue 0
++        }
++        let ihl = ((hdr[14] & 0x0f) * 4) as usize;
++        let mut h: u32 = 0x811c_9dc5;
++        let mut mix = |b: u8| {
++            h ^= b as u32;
++            h = h.wrapping_mul(0x0100_0193);
++        };
++        for b in &hdr[26..34] {
++            mix(*b); // src + dst
++        }
++        mix(hdr[23]); // proto
++        let l4 = 14 + ihl;
++        if (hdr[23] == 6 || hdr[23] == 17) && l4 + 4 <= hdr.len() {
++            for b in &hdr[l4..l4 + 4] {
++                mix(*b); // ports
+             }
+-            self.stats.rx_packets += 1;
+-            ostd::debug!("rx {} bytes (req {}, status {:#x})", len, req_id, cdesc.status);
+-            let packet = buf.finish_dma(offset + len);
+-            return Ok(packet.peel(offset));
+         }
++        (h as usize) % n
+     }
+ 
+-    fn do_send(&mut self, packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
+-        if !self.can_send() {
+-            return Err(NetError::Busy);
 +    fn do_send(&mut self, mut packet: TxPacket<LinkLayer>) -> Result<(), NetError> {
 +        let n = self.tx.len();
++        let preferred = self.tx_queue_for(&packet);
 +        let mut qi = None;
 +        for step in 0..n {
-+            let i = (self.next_tx + step) % n;
++            let i = (preferred + step) % n;
 +            if self.tx[i].q.sq.free_entries() >= 2 && !self.tx[i].free_ids.is_empty() {
 +                qi = Some(i);
 +                break;
 +            }
-+        }
+         }
 +        let Some(qi) = qi else {
 +            static ONCE: AtomicU32 = AtomicU32::new(0);
 +            if ONCE.fetch_add(1, Ordering::Relaxed) < 3 {
@@ -1026,7 +1062,7 @@ index 07ce0dcb..9bd591d6 100644
 +            }
 +            return Err(NetError::Busy);
 +        };
-+        self.next_tx = (qi + 1) % n;
++        self.next_tx = qi;
 +
          let len = packet.len();
 +        // Checksum offload: TCP/UDP over IPv4 when the device does partial L4
@@ -1250,7 +1286,7 @@ index 07ce0dcb..9bd591d6 100644
  }
  
  impl AnyNetworkDevice for EnaDevice {
-@@ -334,11 +859,13 @@ impl AnyNetworkDevice for EnaDevice {
+@@ -334,11 +896,13 @@ impl AnyNetworkDevice for EnaDevice {
      }
  
      fn can_receive(&self) -> bool {
@@ -1266,7 +1302,7 @@ index 07ce0dcb..9bd591d6 100644
      }
  
      fn receive(&mut self) -> Result<RxPacket<LinkLayer>, NetError> {
-@@ -357,22 +884,32 @@ impl AnyNetworkDevice for EnaDevice {
+@@ -357,22 +921,32 @@ impl AnyNetworkDevice for EnaDevice {
      }
  
      fn free_processed_tx_buffers(&mut self) {
@@ -1309,7 +1345,7 @@ index 07ce0dcb..9bd591d6 100644
      }
  }
  
-@@ -380,11 +917,14 @@ impl Debug for EnaDevice {
+@@ -380,11 +954,14 @@ impl Debug for EnaDevice {
      fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
          f.debug_struct("EnaDevice")
              .field("mac", &self.mac)

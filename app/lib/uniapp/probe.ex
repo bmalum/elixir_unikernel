@@ -27,7 +27,7 @@ defmodule Uniapp.Probe do
     if peer = Uniapp.Cmdline.get("uniapp.bench_peer") do
       # Give the peer time to boot, then measure NIC to NIC (32 MB round trip).
       Process.sleep(String.to_integer(Uniapp.Cmdline.get("uniapp.bench_delay_ms", "30000")))
-      Uniapp.Health.bench(peer, 8 * 1024 * 1024)
+      Uniapp.Health.bench(peer, String.to_integer(Uniapp.Cmdline.get("uniapp.bench_mb", "32")) * 1024 * 1024)
     end
   end
 

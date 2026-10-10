@@ -71,7 +71,9 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   throughput self-test (`BENCH`), also against a peer (`uniapp.bench_peer`).
 - Asterinas patch 0009: ENA AENQ handling with keep-alive watchdog and a
   device reset path, TCP/UDP checksum offload, multiple queue pairs with
-  RSS (`ena.queues=`), and health work moved out of the timer interrupt.
+  RSS (`ena.queues=`, default one pair per vCPU; Tx steered by flow hash so
+  a connection stays on one queue), and health work moved out of the timer
+  interrupt.
   `scripts/bench-ec2.sh` measures NIC to NIC: 77 to 108 MB/s round trip
   between two t3.small.
 - `scripts/smoke-ec2.sh`: health endpoint, BENCH/BULK, ENA ready and

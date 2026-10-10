@@ -151,8 +151,7 @@ Throughput, t3.small, Asterinas with the ENA driver after patch 0009:
 | Path | Result |
 |---|---|
 | guest-side echo through the NIC driver (`BENCH tcp_echo`, 8 MB) | 78 to 101 MB/s |
-| NIC to NIC, two instances, same subnet (`scripts/bench-ec2.sh`) | 77 to 108 MB/s round trip, one queue pair |
-| same with `ena.queues=2` | 34 to 51 MB/s (single flow; see the patch notes) |
+| NIC to NIC, two instances, same subnet (`scripts/bench-ec2.sh`, 32 MB) | 70 to 108 MB/s round trip, one or two queue pairs alike (BEAM-bound) |
 | from a laptop over the internet (`BULK`, 4 MB) | about 1 MB/s, latency bound |
 
 `scripts/bench-ec2.sh <ami> [kernel args]` launches two instances, has the
@@ -188,8 +187,8 @@ second push 8 MB through the first's TCP echo and prints the sender's
 
 ## What does not work yet
 
-- ENA: no LLQ, no TSO; one queue pair by default (`ena.queues=auto` for
-  one per vCPU). See the
+- ENA: no LLQ, no TSO; up to 8 queue pairs (one per vCPU by default),
+  tested on 2-vCPU instances only. See the
   [ENA driver notes](../internals/asterinas-patches.md#0009-ena-driver-second-round).
 - Asterinas's NVMe driver needs patch 0007 to talk to EBS (the controller
   reports 32 queue entries and rejects larger queues); it has one I/O queue

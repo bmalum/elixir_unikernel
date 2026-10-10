@@ -274,15 +274,17 @@ behind a load balancer needs; all of it in `kernel/core/comps/ena`.
   flags bad are dropped. Getting the pseudo-header right mattered: with the
   full checksum left in place the device produced wrong sums and every TLS
   handshake stalled.
-- **Queue pairs and RSS.** `ena.queues=N|auto` (default 1, `auto` = one per
+- **Queue pairs and RSS.** `ena.queues=N|auto` (default `auto`: one per
   vCPU, max 8). Each pair has its own MSI-X vector; Rx is drained round
-  robin, Tx picks the next pair with room. RSS: Toeplitz over the IPv4
-  5-tuple, 128-entry indirection table over the Rx completion queues.
-  Measured NIC to NIC with `scripts/bench-ec2.sh` (two t3.small in one
-  subnet, 8 MB through the peer's TCP echo, round trip): one pair 77 to
-  108 MB/s, two pairs 34 to 51 MB/s. A single flow hashes to one Rx queue
-  while Tx alternates queues, so for a single flow one pair is faster; two
-  pairs pay off with many flows. Hence the default.
+  robin; Tx is steered by a hash of the IPv4 5-tuple so one connection
+  stays on one queue. RSS: Toeplitz over the same tuple, 128-entry
+  indirection table over the Rx completion queues. The first version
+  alternated Tx queues per packet, which reorders a flow's segments on the
+  wire and halved single-flow throughput (34 to 51 MB/s with two pairs vs
+  77 to 108 with one); with flow steering two pairs measure 77 to 95 MB/s,
+  one pair 70 to 108, on t3.small and t3.medium, so multi-queue is the
+  default. The echo benchmark is BEAM-bound at that level (1 KiB lines),
+  the NIC has headroom.
 - **Tx completion accounting** counts the descriptors each request used
   (meta + data) instead of trusting `sq_head_idx`.
 

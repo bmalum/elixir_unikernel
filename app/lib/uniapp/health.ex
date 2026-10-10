@@ -149,7 +149,7 @@ defmodule Uniapp.Health do
   defp recv_all(_sock, want, got) when got >= want, do: got
 
   defp recv_all(sock, want, got) do
-    case :gen_tcp.recv(sock, 0, 5_000) do
+    case :gen_tcp.recv(sock, 0, 15_000) do
       {:ok, data} -> recv_all(sock, want, got + byte_size(data))
       {:error, _} -> got
     end

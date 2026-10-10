@@ -38,7 +38,7 @@ Kernel-side keys that matter:
 | `loglevel=N` | kernel verbosity | `error`, `info`, `debug` (a word, not a number) |
 | `rdinit=/init` | tells Linux to run our init | default is `/init` already |
 | `ip=dhcp` | ignored (`/init` does DHCP itself) | in-kernel DHCP client on `eth0`, lease in `/proc/net/dhcp` |
-| `ena.queues=N\|auto` | n/a | ENA queue pairs (default 1; `auto` = one per vCPU, max 8). Kernel parameter: must be on the kernel command line (`ENA_ARGS`), not in user data |
+| `ena.queues=N\|auto` | n/a | ENA queue pairs (default `auto` = one per vCPU, max 8). Kernel parameter: must be on the kernel command line (`ENA_ARGS`), not in user data |
 | `ena.offload=0` | n/a | ENA: software checksums instead of offload |
 | `ena.test_reset=SECONDS` | n/a | ENA: force one device reset after boot (tests the recovery path) |
 | `ena.aenq_irq=1` | n/a | ENA: unmask the admin interrupt (default polled) |
