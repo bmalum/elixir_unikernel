@@ -10,20 +10,17 @@ index 26a2d8a5..cbfae855 100644
 +// Above the triple fault (`Priority::LOW`), which must stay the last resort.
 +register_restart_handler!(try_cpu_reset, Priority::new(1));
 diff --git a/kernel/core/src/arch/x86/power.rs b/kernel/core/src/arch/x86/power.rs
-index 0655a261..5dd490c3 100644
+index 0655a261..7c469e6a 100644
 --- a/kernel/core/src/arch/x86/power.rs
 +++ b/kernel/core/src/arch/x86/power.rs
-@@ -24,6 +24,24 @@ crate::register_poweroff_handler!(
+@@ -24,6 +24,21 @@ crate::register_poweroff_handler!(
      crate::power::Priority::HIGH
  );
  
 +// The triple fault comes after the i8042 controller (which registers at `Priority::new(1)`), as
 +// the last resort. It is the only method that works on machines without an ACPI reset register
 +// or a keyboard controller, such as EC2 Nitro instances.
-+crate::register_restart_handler!(
-+    ostd::arch::power::try_restart,
-+    crate::power::Priority::LOW
-+);
++crate::register_restart_handler!(ostd::arch::power::try_restart, crate::power::Priority::LOW);
 +
 +/// Powers off by restarting.
 +///
@@ -160,7 +157,7 @@ index e2639003..abc8af1c 100644
  
  use crate::prelude::*;
 diff --git a/kernel/core/src/time/system_time.rs b/kernel/core/src/time/system_time.rs
-index 1ed4acf0..bbd425c7 100644
+index 1ed4acf0..e4563659 100644
 --- a/kernel/core/src/time/system_time.rs
 +++ b/kernel/core/src/time/system_time.rs
 @@ -1,6 +1,9 @@
@@ -174,7 +171,7 @@ index 1ed4acf0..bbd425c7 100644
  
  use aster_time::{read_monotonic_time, read_start_time};
  use spin::Once;
-@@ -15,6 +18,46 @@ pub(crate) struct SystemTime(PrimitiveDateTime);
+@@ -15,6 +18,48 @@ pub(crate) struct SystemTime(PrimitiveDateTime);
  pub(crate) static START_TIME: Once<SystemTime> = Once::new();
  pub(super) static START_TIME_AS_DURATION: Once<Duration> = Once::new();
  
@@ -203,6 +200,8 @@ index 1ed4acf0..bbd425c7 100644
 +    let delta = i64::try_from(delta)
 +        .map_err(|_| Error::with_message(Errno::EINVAL, "time out of range"))?;
 +    REALTIME_ADJUST_NANOS.store(delta, Ordering::Release);
++    // TODO: Add vDSO support for LoongArch (see `crate::vdso`).
++    #[cfg(not(target_arch = "loongarch64"))]
 +    crate::vdso::on_realtime_adjusted();
 +    Ok(())
 +}
@@ -221,7 +220,7 @@ index 1ed4acf0..bbd425c7 100644
  pub(super) fn init() {
      let start_time = convert_system_time(read_start_time()).unwrap();
      START_TIME_AS_DURATION
-@@ -41,11 +84,13 @@ impl SystemTime {
+@@ -41,11 +86,13 @@ impl SystemTime {
      /// Returns the current system time
      pub(crate) fn now() -> Self {
          // The get real time result should always be valid
@@ -240,7 +239,7 @@ index 1ed4acf0..bbd425c7 100644
      }
  
      /// Add a duration to self. If the result does not exceed inner bounds return Some(t), else return None.
-@@ -55,7 +100,6 @@ impl SystemTime {
+@@ -55,7 +102,6 @@ impl SystemTime {
      }
  
      /// Subtract a duration from self. If the result does not exceed inner bounds return Some(t), else return None.

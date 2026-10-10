@@ -411,9 +411,18 @@ index 8787f0a4..1f1d93b0 100644
      pub fn routes(&self) -> Vec<Route> {
          self.common().routes()
 diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
-index 5c9c197a..b96f6bfb 100644
+index 5c9c197a..5238bd65 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
+@@ -6,7 +6,7 @@ use core::{
+     sync::atomic::{AtomicU64, Ordering},
+ };
+ 
+-use smoltcp::iface::Route;
++use smoltcp::{iface::Route, socket::PollAt};
+ 
+ use crate::{
+     ext::Ext,
 @@ -57,6 +57,27 @@ impl<E: Ext> PollableIface<E> {
          })
      }

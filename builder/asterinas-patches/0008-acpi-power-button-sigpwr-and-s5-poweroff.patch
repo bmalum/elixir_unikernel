@@ -1,5 +1,5 @@
 diff --git a/kernel/core/src/arch/x86/power.rs b/kernel/core/src/arch/x86/power.rs
-index 5dd490c3..8f906351 100644
+index 7c469e6a..8f906351 100644
 --- a/kernel/core/src/arch/x86/power.rs
 +++ b/kernel/core/src/arch/x86/power.rs
 @@ -1,14 +1,155 @@
@@ -159,19 +159,7 @@ index 5dd490c3..8f906351 100644
  fn try_acpi_reset(_code: ExitCode) {
      // If possible, keep this method panic-free because it may be called by the panic handler.
      if let Some((port, val)) = ACPI_RESET_PORT_AND_VAL.get() {
-@@ -27,10 +168,7 @@ crate::register_poweroff_handler!(
- // The triple fault comes after the i8042 controller (which registers at `Priority::new(1)`), as
- // the last resort. It is the only method that works on machines without an ACPI reset register
- // or a keyboard controller, such as EC2 Nitro instances.
--crate::register_restart_handler!(
--    ostd::arch::power::try_restart,
--    crate::power::Priority::LOW
--);
-+crate::register_restart_handler!(ostd::arch::power::try_restart, crate::power::Priority::LOW);
- 
- /// Powers off by restarting.
- ///
-@@ -52,4 +190,8 @@ pub(super) fn init() {
+@@ -49,4 +190,8 @@ pub(super) fn init() {
              ostd::warn!("The reset port from ACPI is not available");
          }
      }

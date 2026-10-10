@@ -1219,10 +1219,10 @@ index 00000000..d1c06280
 +}
 diff --git a/kernel/core/comps/ena/src/lib.rs b/kernel/core/comps/ena/src/lib.rs
 new file mode 100644
-index 00000000..edc7a000
+index 00000000..73e81cf6
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/lib.rs
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,233 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! Driver for the Amazon Elastic Network Adapter (ENA), the NIC of EC2
@@ -1445,7 +1445,10 @@ index 00000000..edc7a000
 +    }
 +    if registered > 0 {
 +        ostd::timer::register_callback_on_cpu(|| {
-+            if TICKS.fetch_add(1, Ordering::Relaxed) % TICK_DIVIDER == 0 {
++            if TICKS
++                .fetch_add(1, Ordering::Relaxed)
++                .is_multiple_of(TICK_DIVIDER)
++            {
 +                aster_network::raise_receive_softirq();
 +                aster_network::raise_send_softirq();
 +            }

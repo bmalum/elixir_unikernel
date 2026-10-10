@@ -1625,7 +1625,7 @@ index d1c06280..487d9236 100644
  
      /// Writes `desc` at the tail and advances it (flipping the phase on wrap).
 diff --git a/kernel/core/comps/ena/src/lib.rs b/kernel/core/comps/ena/src/lib.rs
-index edc7a000..f35e2fa1 100644
+index 73e81cf6..f35e2fa1 100644
 --- a/kernel/core/comps/ena/src/lib.rs
 +++ b/kernel/core/comps/ena/src/lib.rs
 @@ -3,12 +3,17 @@
@@ -1684,11 +1684,14 @@ index edc7a000..f35e2fa1 100644
  
  #[init_component]
  fn ena_init() -> Result<(), ComponentInitError> {
-@@ -220,10 +237,16 @@ fn ena_init() -> Result<(), ComponentInitError> {
+@@ -220,13 +237,16 @@ fn ena_init() -> Result<(), ComponentInitError> {
      }
      if registered > 0 {
          ostd::timer::register_callback_on_cpu(|| {
--            if TICKS.fetch_add(1, Ordering::Relaxed) % TICK_DIVIDER == 0 {
+-            if TICKS
+-                .fetch_add(1, Ordering::Relaxed)
+-                .is_multiple_of(TICK_DIVIDER)
+-            {
 +            device::TICK_MS.fetch_add(1, Ordering::Relaxed);
 +            let t = device::TICKS.fetch_add(1, Ordering::Relaxed);
 +            if t.is_multiple_of(TICK_DIVIDER) {

@@ -481,14 +481,14 @@ index 95e0aac2..9e4d6cd3 100644
  
          if tx_packet.is_some() {
 diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
-index b96f6bfb..9b50c6e9 100644
+index 5238bd65..9b50c6e9 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 @@ -6,7 +6,14 @@ use core::{
      sync::atomic::{AtomicU64, Ordering},
  };
  
--use smoltcp::iface::Route;
+-use smoltcp::{iface::Route, socket::PollAt};
 +use smoltcp::{
 +    iface::Route,
 +    socket::{
