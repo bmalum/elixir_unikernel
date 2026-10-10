@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turns builder/asterinas-patches into commits on upstream Asterinas 3d85cb44,
 # one topic branch per upstreamable unit plus `elixir-unikernel-all`, in a
-# clone of the fork at $FORK (default /tmp/aster-fork, github.com/bmalum/asterinas).
+# clone of the fork at $FORK (default build/aster-fork, github.com/bmalum/asterinas).
 # Commit messages come from the manual's patch chapter (build/patch-msgs, see
 # below). Pass --push to push every branch to origin.
 #
@@ -9,7 +9,7 @@
 set -euo pipefail
 PUSH=${1:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-FORK=${FORK:-/tmp/aster-fork}
+FORK=${FORK:-$PWD/build/aster-fork}
 BASE=3d85cb44263808723ee46c5dbbd06b330a2b3204
 P=$ROOT/builder/asterinas-patches
 M=$ROOT/build/patch-msgs

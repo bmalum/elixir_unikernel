@@ -11,17 +11,17 @@ index 454741af..b1504d11 100644
  takeable = "0.2.2"
  time = { version = "0.3", default-features = false, features = ["alloc"] }
 diff --git a/kernel/core/src/fs/fs_impls/procfs/mod.rs b/kernel/core/src/fs/fs_impls/procfs/mod.rs
-index 0c2201ae..1070fd97 100644
+index 0c2201ae..3bf912cf 100644
 --- a/kernel/core/src/fs/fs_impls/procfs/mod.rs
 +++ b/kernel/core/src/fs/fs_impls/procfs/mod.rs
-@@ -41,6 +41,7 @@ use crate::{
- };
- 
- mod cmdline;
-+mod net;
- mod cpuinfo;
- mod filesystems;
+@@ -46,6 +46,7 @@ mod filesystems;
  mod loadavg;
+ mod meminfo;
+ mod mounts;
++mod net;
+ mod pid;
+ mod self_;
+ mod stat;
 @@ -161,6 +162,7 @@ impl RootDirOps {
          ("loadavg", InodeType::File, LoadAvgFileOps::new_inode),
          ("meminfo", InodeType::File, MemInfoFileOps::new_inode),
@@ -32,10 +32,10 @@ index 0c2201ae..1070fd97 100644
          ("sys", InodeType::Dir, SysDirOps::new_inode),
 diff --git a/kernel/core/src/fs/fs_impls/procfs/net.rs b/kernel/core/src/fs/fs_impls/procfs/net.rs
 new file mode 100644
-index 00000000..dab0448f
+index 00000000..e70b86bd
 --- /dev/null
 +++ b/kernel/core/src/fs/fs_impls/procfs/net.rs
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,74 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! `/proc/net`.
@@ -51,9 +51,7 @@ index 00000000..dab0448f
 +use crate::{
 +    fs::{
 +        file::{InodeType, mkmod},
-+        procfs::template::{
-+            ProcDir, ProcDirOps, ProcFile, ProcFileOps, lookup_child_from_table,
-+        },
++        procfs::template::{ProcDir, ProcDirOps, ProcFile, ProcFileOps, lookup_child_from_table},
 +        vfs::inode::Inode,
 +    },
 +    prelude::*,
@@ -66,9 +64,8 @@ index 00000000..dab0448f
 +        ProcDir::new(Self, parent, mkmod!(a+rx))
 +    }
 +
-+    const STATIC_ENTRIES: &'static [StaticEntry] = &[
-+        ("dhcp", InodeType::File, DhcpFileOps::new_inode),
-+    ];
++    const STATIC_ENTRIES: &'static [StaticEntry] =
++        &[("dhcp", InodeType::File, DhcpFileOps::new_inode)];
 +}
 +
 +impl ProcDirOps for NetDirOps {
@@ -148,10 +145,10 @@ index 5e8ac771..e88d2b34 100644
          Wrapper(virtio_net),
          ether_addr,
 diff --git a/kernel/core/src/net/mod.rs b/kernel/core/src/net/mod.rs
-index ba135877..99dbf739 100644
+index ba135877..419f3a20 100644
 --- a/kernel/core/src/net/mod.rs
 +++ b/kernel/core/src/net/mod.rs
-@@ -1,10 +1,50 @@
+@@ -1,10 +1,52 @@
  // SPDX-License-Identifier: MPL-2.0
  
 +use crate::prelude::*;
@@ -177,7 +174,9 @@ index ba135877..99dbf739 100644
 +        if dns.is_empty() {
 +            continue;
 +        }
-+        let Some(cidr) = iface.ipv4_cidr() else { continue };
++        let Some(cidr) = iface.ipv4_cidr() else {
++            continue;
++        };
 +        let gw = iface
 +            .routes()
 +            .into_iter()
@@ -203,18 +202,18 @@ index ba135877..99dbf739 100644
      iface::init();
      route::init();
 diff --git a/kernel/core/src/net/route/mod.rs b/kernel/core/src/net/route/mod.rs
-index 6d918c12..50948f0d 100644
+index bcabe1f9..7b65a1e6 100644
 --- a/kernel/core/src/net/route/mod.rs
 +++ b/kernel/core/src/net/route/mod.rs
-@@ -10,6 +10,8 @@ use aster_bigtcp::{
-     iface::InterfaceType,
-     wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
- };
+@@ -6,6 +6,8 @@
+ //! Callers can look up the local interface that owns an address when binding a socket,
+ //! or select an output interface when connecting an unbound socket.
+ 
 +use core::sync::atomic::{AtomicU64, Ordering};
 +
- use spin::Once;
- 
- use self::{manager::RouteManager, rule::Rule};
+ use aster_bigtcp::{
+     iface::InterfaceType,
+     wire::{IpAddress, IpCidr, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
 @@ -59,12 +61,27 @@ fn build_ipv6_manager() -> RouteManager<Ipv6Address> {
      )
  }
@@ -272,15 +271,21 @@ index b522626e..4a87ecf5 100644
  spin.workspace = true
  takeable.workspace = true
 diff --git a/kernel/libs/aster-bigtcp/src/iface/common.rs b/kernel/libs/aster-bigtcp/src/iface/common.rs
-index c5882f1d..41e0cba8 100644
+index 2432c3db..2f511aab 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/common.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/common.rs
-@@ -109,6 +109,32 @@ impl<E: Ext> IfaceCommon<E> {
+@@ -109,6 +109,38 @@ impl<E: Ext> IfaceCommon<E> {
          flags: InterfaceFlags,
          interface: smoltcp::iface::Interface,
          sched_poll: E::ScheduleNextPoll,
 +    ) -> Self {
-+        Self::with_pollable(name, type_, flags, PollableIface::new(interface), sched_poll)
++        Self::with_pollable(
++            name,
++            type_,
++            flags,
++            PollableIface::new(interface),
++            sched_poll,
++        )
 +    }
 +
 +    pub(super) fn new_with_dhcp(
@@ -308,7 +313,7 @@ index c5882f1d..41e0cba8 100644
      ) -> Self {
          let index = INTERFACE_INDEX_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
  
-@@ -117,7 +143,7 @@ impl<E: Ext> IfaceCommon<E> {
+@@ -117,7 +149,7 @@ impl<E: Ext> IfaceCommon<E> {
              name,
              type_,
              flags,
@@ -317,7 +322,7 @@ index c5882f1d..41e0cba8 100644
              used_ports: SpinLock::new(PortTable::new()),
              sockets: SpinLock::new(SocketTable::new()),
              sched_poll,
-@@ -145,11 +171,24 @@ impl<E: Ext> IfaceCommon<E> {
+@@ -145,11 +177,24 @@ impl<E: Ext> IfaceCommon<E> {
      }
  
      pub(super) fn set_ipv4_cidr(&self, cidr: Ipv4Cidr) {
@@ -343,7 +348,7 @@ index c5882f1d..41e0cba8 100644
      }
  
      pub(super) fn ipv6_cidr(&self) -> Option<Ipv6Cidr> {
-@@ -271,6 +310,13 @@ impl<E: Ext> IfaceCommon<E> {
+@@ -271,6 +316,13 @@ impl<E: Ext> IfaceCommon<E> {
          context.poll_ingress(device, phy);
          context.poll_egress(device, phy);
  
@@ -476,7 +481,7 @@ index 95e0aac2..9e4d6cd3 100644
  
          if tx_packet.is_some() {
 diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
-index 1b883d60..c8848de3 100644
+index b96f6bfb..9b50c6e9 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 @@ -6,7 +6,14 @@ use core::{
@@ -495,7 +500,7 @@ index 1b883d60..c8848de3 100644
  
  use crate::{
      ext::Ext,
-@@ -20,20 +27,96 @@ use crate::{
+@@ -20,20 +27,91 @@ use crate::{
  pub(crate) struct PollableIface<E: Ext> {
      interface: smoltcp::iface::Interface,
      pending_conns: PendingConnSet<E>,
@@ -557,12 +562,7 @@ index 1b883d60..c8848de3 100644
 +                let address = config.address;
 +                let router = config.router;
 +                let dns: Vec<Ipv4Address> = config.dns_servers.iter().copied().collect();
-+                log::info!(
-+                    "dhcp: lease {} gateway {:?} dns {:?}",
-+                    address,
-+                    router,
-+                    dns
-+                );
++                log::info!("dhcp: lease {} gateway {:?} dns {:?}", address, router, dns);
 +                self.set_ipv4_cidr(address);
 +                self.set_ipv4_gateway(router);
 +                self.dns_servers = dns;
@@ -592,7 +592,7 @@ index 1b883d60..c8848de3 100644
          }
      }
  
-@@ -66,7 +149,7 @@ impl<E: Ext> PollableIface<E> {
+@@ -66,7 +144,7 @@ impl<E: Ext> PollableIface<E> {
      }
  
      /// Replaces the default IPv4 route.
@@ -601,7 +601,7 @@ index 1b883d60..c8848de3 100644
          let routes = self.interface.routes_mut();
          match gateway {
              Some(gw) => {
-@@ -87,8 +170,20 @@ impl<E: Ext> PollableIface<E> {
+@@ -87,8 +165,20 @@ impl<E: Ext> PollableIface<E> {
      }
  
      /// Returns the next poll time.
@@ -624,7 +624,7 @@ index 1b883d60..c8848de3 100644
      }
  }
  
-@@ -143,6 +238,7 @@ impl<E: Ext> PollableIface<E> {
+@@ -143,6 +233,7 @@ impl<E: Ext> PollableIface<E> {
  pub(crate) struct PollableIfaceMut<'a, E: Ext> {
      context: &'a mut smoltcp::iface::Context,
      pending_conns: &'a mut PendingConnSet<E>,
@@ -632,7 +632,7 @@ index 1b883d60..c8848de3 100644
  }
  
  // FIXME: We provide `new()` and `inner_mut()` as `pub(crate)` methods because it's necessary to
-@@ -156,12 +252,51 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
+@@ -156,12 +247,51 @@ impl<'a, E: Ext> PollableIfaceMut<'a, E> {
          Self {
              context,
              pending_conns,

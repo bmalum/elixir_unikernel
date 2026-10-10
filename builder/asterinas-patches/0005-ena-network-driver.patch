@@ -78,10 +78,10 @@ index 00000000..084d49b4
 +workspace = true
 diff --git a/kernel/core/comps/ena/src/admin.rs b/kernel/core/comps/ena/src/admin.rs
 new file mode 100644
-index 00000000..69ad8d1c
+index 00000000..4178fa31
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/admin.rs
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,463 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! The ENA admin queue: device reset, readless MMIO, admin commands
@@ -97,8 +97,8 @@ index 00000000..69ad8d1c
 +
 +use aster_pci::cfg_space::BarAccess;
 +use ostd::{
-+    mm::{HasDaddr, VmIo, VmIoOnce, dma::DmaCoherent},
 +    Error,
++    mm::{HasDaddr, VmIo, VmIoOnce, dma::DmaCoherent},
 +};
 +
 +use crate::regs;
@@ -283,19 +283,30 @@ index 00000000..69ad8d1c
 +            let resp: MmioReadResp = self.mmio_resp.read_val(0).unwrap();
 +            if resp.req_id == seq {
 +                if resp.reg_off as usize != off {
-+                    ostd::warn!("readless MMIO answered for offset {:#x}, wanted {:#x}", resp.reg_off, off);
++                    ostd::warn!(
++                        "readless MMIO answered for offset {:#x}, wanted {:#x}",
++                        resp.reg_off,
++                        off
++                    );
 +                    return regs::MMIO_READ_TIMEOUT;
 +                }
 +                return resp.reg_val;
 +            }
 +            delay_us(1);
 +        }
-+        ostd::warn!("readless MMIO read of {:#x} timed out; using direct reads", off);
++        ostd::warn!(
++            "readless MMIO read of {:#x} timed out; using direct reads",
++            off
++        );
 +        self.readless = false;
 +        self.bar.read_once(off).unwrap()
 +    }
 +
-+    fn wait_reset_state(&mut self, timeout_100ms: u32, expect_in_progress: bool) -> Result<(), AdminError> {
++    fn wait_reset_state(
++        &mut self,
++        timeout_100ms: u32,
++        expect_in_progress: bool,
++    ) -> Result<(), AdminError> {
 +        for _ in 0..timeout_100ms.max(1) * 100 {
 +            let sts = self.read32(regs::DEV_STS);
 +            if sts == regs::MMIO_READ_TIMEOUT {
@@ -319,12 +330,17 @@ index 00000000..69ad8d1c
 +            return Err(AdminError::NotReady);
 +        }
 +        let timeout = (caps & regs::CAPS_RESET_TIMEOUT_MASK) >> regs::CAPS_RESET_TIMEOUT_SHIFT;
-+        ostd::debug!("caps {:#x}: reset timeout {} x100ms, dma width {}", caps, timeout,
-+            (caps & regs::CAPS_DMA_ADDR_WIDTH_MASK) >> regs::CAPS_DMA_ADDR_WIDTH_SHIFT);
++        ostd::debug!(
++            "caps {:#x}: reset timeout {} x100ms, dma width {}",
++            caps,
++            timeout,
++            (caps & regs::CAPS_DMA_ADDR_WIDTH_MASK) >> regs::CAPS_DMA_ADDR_WIDTH_SHIFT
++        );
 +
 +        self.write32(
 +            regs::DEV_CTL,
-+            regs::DEV_CTL_DEV_RESET | (regs::RESET_REASON_NORMAL << regs::DEV_CTL_RESET_REASON_SHIFT),
++            regs::DEV_CTL_DEV_RESET
++                | (regs::RESET_REASON_NORMAL << regs::DEV_CTL_RESET_REASON_SHIFT),
 +        );
 +        // The reset clears the readless response address; write it again.
 +        self.write_mmio_resp_addr();
@@ -351,14 +367,23 @@ index 00000000..69ad8d1c
 +        self.write32(regs::ACQ_BASE_LO, lo);
 +        self.write32(regs::ACQ_BASE_HI, hi);
 +        let entry = (size_of::<AqEntry>() as u32) << regs::AQ_CAPS_ENTRY_SIZE_SHIFT;
-+        self.write32(regs::AQ_CAPS, entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK));
-+        self.write32(regs::ACQ_CAPS, entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK));
++        self.write32(
++            regs::AQ_CAPS,
++            entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK),
++        );
++        self.write32(
++            regs::ACQ_CAPS,
++            entry | (ADMIN_QUEUE_DEPTH as u32 & regs::AQ_CAPS_DEPTH_MASK),
++        );
 +
 +        // The AENQ must exist even though we never enable any event group.
 +        let (lo, hi) = mem_addr_words(self.aenq.daddr());
 +        self.write32(regs::AENQ_BASE_LO, lo);
 +        self.write32(regs::AENQ_BASE_HI, hi);
-+        self.write32(regs::AENQ_CAPS, (64u32 << regs::AQ_CAPS_ENTRY_SIZE_SHIFT) | AENQ_DEPTH as u32);
++        self.write32(
++            regs::AENQ_CAPS,
++            (64u32 << regs::AQ_CAPS_ENTRY_SIZE_SHIFT) | AENQ_DEPTH as u32,
++        );
 +
 +        // Admin completions are polled: mask the admin interrupt.
 +        self.write32(regs::INTR_MASK, regs::ADMIN_INTR_MASK);
@@ -378,7 +403,7 @@ index 00000000..69ad8d1c
 +        self.sq.write_val(slot, &cmd).unwrap();
 +        fence(Ordering::SeqCst);
 +        self.sq_tail = self.sq_tail.wrapping_add(1);
-+        if self.sq_tail % depth == 0 {
++        if self.sq_tail.is_multiple_of(depth) {
 +            self.sq_phase ^= 1;
 +        }
 +        self.write32(regs::AQ_DB, self.sq_tail as u32);
@@ -391,14 +416,23 @@ index 00000000..69ad8d1c
 +                fence(Ordering::SeqCst);
 +                let entry: AcqEntry = self.cq.read_val(slot).unwrap();
 +                self.cq_head = self.cq_head.wrapping_add(1);
-+                if self.cq_head % depth == 0 {
++                if self.cq_head.is_multiple_of(depth) {
 +                    self.cq_phase ^= 1;
 +                }
 +                if entry.command & COMMAND_ID_MASK != cmd_id {
-+                    ostd::warn!("admin completion for command {} while waiting for {}", entry.command & COMMAND_ID_MASK, cmd_id);
++                    ostd::warn!(
++                        "admin completion for command {} while waiting for {}",
++                        entry.command & COMMAND_ID_MASK,
++                        cmd_id
++                    );
 +                    continue;
 +                }
-+                ostd::debug!("admin op {} -> status {} ext {}", cmd.opcode, entry.status, entry.extended_status);
++                ostd::debug!(
++                    "admin op {} -> status {} ext {}",
++                    cmd.opcode,
++                    entry.status,
++                    entry.extended_status
++                );
 +                if entry.status != 0 {
 +                    return Err(AdminError::CommandFailed(entry.status));
 +                }
@@ -414,8 +448,15 @@ index 00000000..69ad8d1c
 +    }
 +
 +    /// `GET_FEATURE feature_id` (inline response).
-+    pub(crate) fn get_feature(&mut self, feature_id: u8, version: u8) -> Result<[u32; 14], AdminError> {
-+        let mut cmd = AqEntry { opcode: OP_GET_FEATURE, ..Default::default() };
++    pub(crate) fn get_feature(
++        &mut self,
++        feature_id: u8,
++        version: u8,
++    ) -> Result<[u32; 14], AdminError> {
++        let mut cmd = AqEntry {
++            opcode: OP_GET_FEATURE,
++            ..Default::default()
++        };
 +        // words[0..3] = control buffer (unused), words[3] = feat_common
 +        cmd.words[3] = (feature_id as u32) << 8 | (version as u32) << 16;
 +        Ok(self.execute(cmd)?.data)
@@ -423,7 +464,10 @@ index 00000000..69ad8d1c
 +
 +    /// `SET_FEATURE feature_id` with up to 11 words of inline data.
 +    pub(crate) fn set_feature(&mut self, feature_id: u8, data: &[u32]) -> Result<(), AdminError> {
-+        let mut cmd = AqEntry { opcode: OP_SET_FEATURE, ..Default::default() };
++        let mut cmd = AqEntry {
++            opcode: OP_SET_FEATURE,
++            ..Default::default()
++        };
 +        cmd.words[3] = (feature_id as u32) << 8;
 +        for (i, w) in data.iter().enumerate().take(11) {
 +            cmd.words[4 + i] = *w;
@@ -440,7 +484,10 @@ index 00000000..69ad8d1c
 +        base: usize,
 +    ) -> Result<(u16, u32, u32), AdminError> {
 +        const INTERRUPT_MODE_ENABLED: u32 = 1 << 5;
-+        let mut cmd = AqEntry { opcode: OP_CREATE_CQ, ..Default::default() };
++        let mut cmd = AqEntry {
++            opcode: OP_CREATE_CQ,
++            ..Default::default()
++        };
 +        let cq_caps_1 = INTERRUPT_MODE_ENABLED;
 +        let cq_caps_2 = (cdesc_size / 4) as u32 & 0x1f;
 +        cmd.words[0] = cq_caps_1 | cq_caps_2 << 8 | (depth as u32) << 16;
@@ -451,7 +498,13 @@ index 00000000..69ad8d1c
 +        let resp = self.execute(cmd)?;
 +        let cq_idx = (resp.data[0] & 0xffff) as u16;
 +        let actual_depth = (resp.data[0] >> 16) as u16;
-+        ostd::debug!("created cq {} depth {} head_db {:#x} unmask {:#x}", cq_idx, actual_depth, resp.data[2], resp.data[3]);
++        ostd::debug!(
++            "created cq {} depth {} head_db {:#x} unmask {:#x}",
++            cq_idx,
++            actual_depth,
++            resp.data[2],
++            resp.data[3]
++        );
 +        Ok((cq_idx, resp.data[2], resp.data[3]))
 +    }
 +
@@ -464,9 +517,13 @@ index 00000000..69ad8d1c
 +        base: usize,
 +    ) -> Result<(u16, u32), AdminError> {
 +        const IS_PHYSICALLY_CONTIGUOUS: u32 = 1;
-+        let mut cmd = AqEntry { opcode: OP_CREATE_SQ, ..Default::default() };
++        let mut cmd = AqEntry {
++            opcode: OP_CREATE_SQ,
++            ..Default::default()
++        };
 +        let sq_identity = ((direction as u32) << 5) & 0xe0;
-+        let sq_caps_2 = (PLACEMENT_POLICY_HOST as u32 & 0xf) | ((COMPLETION_POLICY_DESC as u32) << 4 & 0x70);
++        let sq_caps_2 =
++            (PLACEMENT_POLICY_HOST as u32 & 0xf) | ((COMPLETION_POLICY_DESC as u32) << 4 & 0x70);
 +        let sq_caps_3 = IS_PHYSICALLY_CONTIGUOUS;
 +        cmd.words[0] = sq_identity | sq_caps_2 << 16 | sq_caps_3 << 24;
 +        cmd.words[1] = cq_idx as u32 | (depth as u32) << 16;
@@ -475,7 +532,12 @@ index 00000000..69ad8d1c
 +        cmd.words[3] = hi;
 +        let resp = self.execute(cmd)?;
 +        let sq_idx = (resp.data[0] & 0xffff) as u16;
-+        ostd::debug!("created sq {} (dir {}) doorbell {:#x}", sq_idx, direction, resp.data[1]);
++        ostd::debug!(
++            "created sq {} (dir {}) doorbell {:#x}",
++            sq_idx,
++            direction,
++            resp.data[1]
++        );
 +        Ok((sq_idx, resp.data[1]))
 +    }
 +
@@ -485,10 +547,10 @@ index 00000000..69ad8d1c
 +}
 diff --git a/kernel/core/comps/ena/src/device.rs b/kernel/core/comps/ena/src/device.rs
 new file mode 100644
-index 00000000..07ce0dcb
+index 00000000..dced15de
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/device.rs
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,443 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! The ENA network device: one Tx/Rx queue pair, software checksums,
@@ -502,7 +564,9 @@ index 00000000..07ce0dcb
 +
 +use aster_bigtcp::{
 +    device::{AnyNetworkDevice, Checksum, DeviceCapabilities, EthernetAddress, Medium, NetError},
-+    packet::{ApplicationLayer, FreshTxPacket, Layer, LinkLayer, RxBuffer, RxPacket, TxBuffer, TxPacket},
++    packet::{
++        ApplicationLayer, FreshTxPacket, Layer, LinkLayer, RxBuffer, RxPacket, TxBuffer, TxPacket,
++    },
 +};
 +use aster_pci::capability::msix::CapabilityMsixData;
 +use dma_pool::DmaPool;
@@ -614,14 +678,27 @@ index 00000000..07ce0dcb
 +            Err(_) => match admin.get_feature(admin::FEAT_MAX_QUEUES_NUM, 0) {
 +                Ok(q) => (q[1], q[3]),
 +                Err(e) => {
-+                    ostd::warn!("cannot query queue limits ({:?}); assuming {}", e, IO_QUEUE_DEPTH);
++                    ostd::warn!(
++                        "cannot query queue limits ({:?}); assuming {}",
++                        e,
++                        IO_QUEUE_DEPTH
++                    );
 +                    (IO_QUEUE_DEPTH as u32, IO_QUEUE_DEPTH as u32)
 +                }
 +            },
 +        };
-+        ostd::debug!("max sq depth {}, max cq depth {}", max_sq_depth, max_cq_depth);
++        ostd::debug!(
++            "max sq depth {}, max cq depth {}",
++            max_sq_depth,
++            max_cq_depth
++        );
 +        if (IO_QUEUE_DEPTH as u32) > max_sq_depth || (IO_QUEUE_DEPTH as u32) > max_cq_depth {
-+            ostd::warn!("device limits ({}, {}) below ring depth {}", max_sq_depth, max_cq_depth, IO_QUEUE_DEPTH);
++            ostd::warn!(
++                "device limits ({}, {}) below ring depth {}",
++                max_sq_depth,
++                max_cq_depth,
++                IO_QUEUE_DEPTH
++            );
 +        }
 +
 +        // No asynchronous events: the admin interrupt is masked and we never read the AENQ.
@@ -634,10 +711,24 @@ index 00000000..07ce0dcb
 +        }
 +
 +        // MSI-X: vector 0 is the (masked) admin vector; the queue pair uses vector 1.
-+        let vector: u16 = if msix.table_size() >= 2 { 1 } else { return Err(EnaError::NoMsix) };
++        let vector: u16 = if msix.table_size() >= 2 {
++            1
++        } else {
++            return Err(EnaError::NoMsix);
++        };
 +
-+        let rx = Self::create_queue(&mut admin, admin::SQ_DIRECTION_RX, size_of::<RxCdesc>(), vector)?;
-+        let tx = Self::create_queue(&mut admin, admin::SQ_DIRECTION_TX, size_of::<TxCdesc>(), vector)?;
++        let rx = Self::create_queue(
++            &mut admin,
++            admin::SQ_DIRECTION_RX,
++            size_of::<RxCdesc>(),
++            vector,
++        )?;
++        let tx = Self::create_queue(
++            &mut admin,
++            admin::SQ_DIRECTION_TX,
++            size_of::<TxCdesc>(),
++            vector,
++        )?;
 +
 +        fn on_io_irq(_: &TrapFrame) {
 +            aster_network::raise_receive_softirq();
@@ -690,13 +781,25 @@ index 00000000..07ce0dcb
 +        Ok(())
 +    }
 +
-+    fn create_queue(admin: &mut AdminQueue, direction: u8, cdesc_size: usize, vector: u16) -> Result<Queue, EnaError> {
++    fn create_queue(
++        admin: &mut AdminQueue,
++        direction: u8,
++        cdesc_size: usize,
++        vector: u16,
++    ) -> Result<Queue, EnaError> {
 +        let cq = CompletionRing::new(cdesc_size)?;
 +        let (cq_idx, cq_head_doorbell, cq_unmask) =
 +            admin.create_cq(IO_QUEUE_DEPTH, cdesc_size as u16, vector as u32, cq.daddr())?;
 +        let sq = SubmissionRing::new()?;
-+        let (_sq_idx, sq_doorbell) = admin.create_sq(direction, cq_idx, IO_QUEUE_DEPTH, sq.daddr())?;
-+        Ok(Queue { sq, cq, sq_doorbell, cq_head_doorbell, cq_unmask })
++        let (_sq_idx, sq_doorbell) =
++            admin.create_sq(direction, cq_idx, IO_QUEUE_DEPTH, sq.daddr())?;
++        Ok(Queue {
++            sq,
++            cq,
++            sq_doorbell,
++            cq_head_doorbell,
++            cq_unmask,
++        })
 +    }
 +
 +    fn write_reg(&self, offset: u32, val: u32) {
@@ -708,7 +811,10 @@ index 00000000..07ce0dcb
 +        let daddr = buf.daddr();
 +        let desc = RxDesc {
 +            length: buf.size() as u16,
-+            ctrl: io::RX_DESC_FIRST | io::RX_DESC_LAST | io::RX_DESC_COMP_REQ | (self.rx.sq.phase & io::RX_DESC_PHASE_MASK),
++            ctrl: io::RX_DESC_FIRST
++                | io::RX_DESC_LAST
++                | io::RX_DESC_COMP_REQ
++                | (self.rx.sq.phase & io::RX_DESC_PHASE_MASK),
 +            req_id,
 +            buff_addr_lo: daddr as u32,
 +            buff_addr_hi: (daddr >> 32) as u16,
@@ -763,11 +869,15 @@ index 00000000..07ce0dcb
 +                ostd::error!("cannot refill rx slot {}: {:?}", req_id, e);
 +            }
 +
-+            let whole = cdesc.status & io::RX_CDESC_FIRST != 0 && cdesc.status & io::RX_CDESC_LAST != 0;
++            let whole =
++                cdesc.status & io::RX_CDESC_FIRST != 0 && cdesc.status & io::RX_CDESC_LAST != 0;
 +            if !whole {
 +                // Frames larger than one buffer are not expected with MTU 1500; drop the pieces.
 +                self.stats.rx_dropped += 1;
-+                ostd::debug!("dropping multi-descriptor rx frame (status {:#x})", cdesc.status);
++                ostd::debug!(
++                    "dropping multi-descriptor rx frame (status {:#x})",
++                    cdesc.status
++                );
 +                continue;
 +            }
 +            let offset = cdesc.offset as usize;
@@ -778,7 +888,12 @@ index 00000000..07ce0dcb
 +                continue;
 +            }
 +            self.stats.rx_packets += 1;
-+            ostd::debug!("rx {} bytes (req {}, status {:#x})", len, req_id, cdesc.status);
++            ostd::debug!(
++                "rx {} bytes (req {}, status {:#x})",
++                len,
++                req_id,
++                cdesc.status
++            );
 +            let packet = buf.finish_dma(offset + len);
 +            return Ok(packet.peel(offset));
 +        }
@@ -881,10 +996,10 @@ index 00000000..07ce0dcb
 +}
 diff --git a/kernel/core/comps/ena/src/io.rs b/kernel/core/comps/ena/src/io.rs
 new file mode 100644
-index 00000000..f2af1563
+index 00000000..d1c06280
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/io.rs
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,174 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! ENA I/O rings: one Tx submission/completion pair and one Rx pair, in
@@ -982,7 +1097,12 @@ index 00000000..f2af1563
 +    pub(crate) fn new() -> Result<Self, ostd::Error> {
 +        let bytes = IO_QUEUE_DEPTH as usize * 16;
 +        let mem = DmaCoherent::alloc(bytes.div_ceil(ostd::mm::PAGE_SIZE), true)?;
-+        Ok(Self { mem, tail: 0, next_to_comp: 0, phase: 1 })
++        Ok(Self {
++            mem,
++            tail: 0,
++            next_to_comp: 0,
++            phase: 1,
++        })
 +    }
 +
 +    pub(crate) fn daddr(&self) -> usize {
@@ -998,7 +1118,7 @@ index 00000000..f2af1563
 +        let slot = (self.tail % IO_QUEUE_DEPTH) as usize * 16;
 +        self.mem.write_val(slot, desc).unwrap();
 +        self.tail = self.tail.wrapping_add(1);
-+        if self.tail % IO_QUEUE_DEPTH == 0 {
++        if self.tail.is_multiple_of(IO_QUEUE_DEPTH) {
 +            self.phase ^= 1;
 +        }
 +    }
@@ -1017,7 +1137,13 @@ index 00000000..f2af1563
 +    pub(crate) fn new(entry_size: usize) -> Result<Self, ostd::Error> {
 +        let bytes = IO_QUEUE_DEPTH as usize * entry_size;
 +        let mem = DmaCoherent::alloc(bytes.div_ceil(ostd::mm::PAGE_SIZE), true)?;
-+        Ok(Self { mem, entry_size, head: 0, phase: 1, last_head_reported: 0 })
++        Ok(Self {
++            mem,
++            entry_size,
++            head: 0,
++            phase: 1,
++            last_head_reported: 0,
++        })
 +    }
 +
 +    pub(crate) fn daddr(&self) -> usize {
@@ -1042,7 +1168,7 @@ index 00000000..f2af1563
 +        fence(Ordering::SeqCst);
 +        let entry: T = self.mem.read_val(slot).unwrap();
 +        self.head = self.head.wrapping_add(1);
-+        if self.head % IO_QUEUE_DEPTH == 0 {
++        if self.head.is_multiple_of(IO_QUEUE_DEPTH) {
 +            self.phase ^= 1;
 +        }
 +        Some(entry)
@@ -1050,10 +1176,10 @@ index 00000000..f2af1563
 +}
 diff --git a/kernel/core/comps/ena/src/lib.rs b/kernel/core/comps/ena/src/lib.rs
 new file mode 100644
-index 00000000..98ed3cf1
+index 00000000..edc7a000
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/lib.rs
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,230 @@
 +// SPDX-License-Identifier: MPL-2.0
 +
 +//! Driver for the Amazon Elastic Network Adapter (ENA), the NIC of EC2
@@ -1138,7 +1264,9 @@ index 00000000..98ed3cf1
 +
 +impl core::fmt::Debug for Probed {
 +    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-+        f.debug_struct("Probed").field("id", &self.id).finish_non_exhaustive()
++        f.debug_struct("Probed")
++            .field("id", &self.id)
++            .finish_non_exhaustive()
 +    }
 +}
 +
@@ -1251,13 +1379,23 @@ index 00000000..98ed3cf1
 +        let admin = match admin::AdminQueue::new(p.bar0) {
 +            Ok(a) => a,
 +            Err(e) => {
-+                ostd::early_println!("[kernel] ena: {:04x}:{:04x}: admin queue init failed: {:?}", p.id.vendor_id, p.id.device_id, e);
++                ostd::early_println!(
++                    "[kernel] ena: {:04x}:{:04x}: admin queue init failed: {:?}",
++                    p.id.vendor_id,
++                    p.id.device_id,
++                    e
++                );
 +                continue;
 +            }
 +        };
 +        match EnaDevice::init(admin, p.msix) {
 +            Ok(()) => registered += 1,
-+            Err(e) => ostd::early_println!("[kernel] ena: {:04x}:{:04x}: device init failed: {:?}", p.id.vendor_id, p.id.device_id, e),
++            Err(e) => ostd::early_println!(
++                "[kernel] ena: {:04x}:{:04x}: device init failed: {:?}",
++                p.id.vendor_id,
++                p.id.device_id,
++                e
++            ),
 +        }
 +        // One interface is all the network stack binds to today.
 +        break;
@@ -1341,7 +1479,7 @@ index 00000000..0d333c74
 +/// Value returned by the readless MMIO path on timeout, like Linux's `ENA_MMIO_READ_TIMEOUT`.
 +pub(crate) const MMIO_READ_TIMEOUT: u32 = 0xffff_ffff;
 diff --git a/kernel/core/src/net/iface/init.rs b/kernel/core/src/net/iface/init.rs
-index e88d2b34..aba9b960 100644
+index e88d2b34..821e74e6 100644
 --- a/kernel/core/src/net/iface/init.rs
 +++ b/kernel/core/src/net/iface/init.rs
 @@ -23,12 +23,20 @@ fn virtio_iface() -> Option<&'static Arc<Iface>> {
@@ -1417,7 +1555,7 @@ index e88d2b34..aba9b960 100644
      // FIXME: These flags are currently hardcoded.
      // In the future, we should set appropriate values.
      let flags = InterfaceFlags::UP
-@@ -137,24 +164,41 @@ fn new_virtio() -> Option<Arc<Iface>> {
+@@ -137,24 +164,51 @@ fn new_virtio() -> Option<Arc<Iface>> {
          | InterfaceFlags::MULTICAST
          | InterfaceFlags::LOWER_UP;
  
@@ -1432,8 +1570,13 @@ index e88d2b34..aba9b960 100644
 +
 +    if device_name == ENA_DEVICE_NAME {
 +        return Some(if dhcp {
-+            EtherIface::new_dhcp(EnaWrapper(virtio_net), ether_addr, name, PollScheduler::new(), flags)
-+                as Arc<Iface>
++            EtherIface::new_dhcp(
++                EnaWrapper(virtio_net),
++                ether_addr,
++                name,
++                PollScheduler::new(),
++                flags,
++            ) as Arc<Iface>
 +        } else {
 +            EtherIface::new(
 +                EnaWrapper(virtio_net),
@@ -1448,15 +1591,10 @@ index e88d2b34..aba9b960 100644
 +    }
 +
 +    Some(if dhcp {
-+        EtherIface::new_dhcp(Wrapper(virtio_net), ether_addr, name, PollScheduler::new(), flags)
-+            as Arc<Iface>
-+    } else {
-+        EtherIface::new(
++        EtherIface::new_dhcp(
              Wrapper(virtio_net),
              ether_addr,
 -            InterfaceName::from_str_truncated("eth0"),
-+            Ipv4Cidr::new(VIRTIO_ADDRESS, VIRTIO_ADDRESS_PREFIX_LEN),
-+            VIRTIO_GATEWAY,
 +            name,
              PollScheduler::new(),
              flags,
@@ -1472,6 +1610,16 @@ index e88d2b34..aba9b960 100644
 -        PollScheduler::new(),
 -        flags,
 -    ))
++        ) as Arc<Iface>
++    } else {
++        EtherIface::new(
++            Wrapper(virtio_net),
++            ether_addr,
++            Ipv4Cidr::new(VIRTIO_ADDRESS, VIRTIO_ADDRESS_PREFIX_LEN),
++            VIRTIO_GATEWAY,
++            name,
++            PollScheduler::new(),
++            flags,
 +        ) as Arc<Iface>
 +    })
  }

@@ -12,7 +12,7 @@ index 06644ee7..ba135877 100644
  pub(crate) mod uts_ns;
  
 diff --git a/kernel/core/src/net/route/mod.rs b/kernel/core/src/net/route/mod.rs
-index 35d20682..6d918c12 100644
+index 35d20682..bcabe1f9 100644
 --- a/kernel/core/src/net/route/mod.rs
 +++ b/kernel/core/src/net/route/mod.rs
 @@ -23,8 +23,49 @@ mod table;
@@ -137,29 +137,28 @@ index 35d20682..6d918c12 100644
                  .lookup_in_local_table(&RouteLookupKey::new(address))
                  .ok_or_else(|| {
                      Error::with_message(
-@@ -262,7 +279,6 @@ pub(super) fn is_broadcast_endpoint(endpoint: &IpEndpoint) -> bool {
-     address.is_broadcast()
+@@ -263,6 +280,7 @@ pub(super) fn is_broadcast_endpoint(endpoint: &IpEndpoint) -> bool {
          || IPV4_ROUTE_MANAGER
              .get()
--            .unwrap()
--            .lookup_entry(&RouteLookupKey::new(address))
-+            .unwrap().read().lookup_entry(&RouteLookupKey::new(address))
+             .unwrap()
++            .read()
+             .lookup_entry(&RouteLookupKey::new(address))
              .is_ok_and(|entry| entry.type_() == RouteType::Broadcast)
  }
 diff --git a/kernel/core/src/net/socket/ip/ioctl.rs b/kernel/core/src/net/socket/ip/ioctl.rs
-index 6b765d91..98ff111f 100644
+index 6b765d91..7d7caab0 100644
 --- a/kernel/core/src/net/socket/ip/ioctl.rs
 +++ b/kernel/core/src/net/socket/ip/ioctl.rs
-@@ -1,20 +1,88 @@
+@@ -1,18 +1,95 @@
  // SPDX-License-Identifier: MPL-2.0
  
 -use aster_bigtcp::{iface::InterfaceFlags, wire::Ipv4Address};
--
--use crate::{dispatch_ioctl, net::socket::util::ioctl::CIfReq, prelude::*, util::ioctl::RawIoctl};
 +use aster_bigtcp::{
 +    iface::InterfaceFlags,
 +    wire::{Ipv4Address, Ipv4Cidr},
 +};
+ 
+-use crate::{dispatch_ioctl, net::socket::util::ioctl::CIfReq, prelude::*, util::ioctl::RawIoctl};
 +use crate::{
 +    dispatch_ioctl,
 +    net::{route, socket::util::ioctl::CIfReq},
@@ -171,7 +170,10 @@ index 6b765d91..98ff111f 100644
 -    use super::CIfReq;
 -    use crate::{ioc, util::ioctl::InOutData};
 +    use super::{CIfReq, CRtEntry};
-+    use crate::{ioc, util::ioctl::{InData, InOutData}};
++    use crate::{
++        ioc,
++        util::ioctl::{InData, InOutData},
++    };
  
      // Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/sockios.h#L62>.
      pub(super) type GetIfAddr    = ioc!(SIOCGIFADDR,    0x8915, InOutData<CIfReq>);
@@ -218,15 +220,21 @@ index 6b765d91..98ff111f 100644
 +        return None;
 +    }
 +    Some(Ipv4Address::new(sa[4], sa[5], sa[6], sa[7]))
- }
- 
++}
++
 +/// Applies a new address or netmask to `iface`, keeping the other half of the
 +/// CIDR, then rebuilds the routing tables.
-+fn set_iface_ipv4(ifreq: &mut CIfReq, addr: Option<Ipv4Address>, netmask: Option<Ipv4Address>) -> Result<i32> {
++fn set_iface_ipv4(
++    ifreq: &mut CIfReq,
++    addr: Option<Ipv4Address>,
++    netmask: Option<Ipv4Address>,
++) -> Result<i32> {
 +    let new = ifreq.get_sockaddr_ipv4()?;
 +    let iface = ifreq.get_iface_by_name()?;
 +    let cur = iface.ipv4_cidr();
-+    let address = addr.or(new.into()).unwrap_or_else(|| cur.map(|c| c.address()).unwrap_or(Ipv4Address::UNSPECIFIED));
++    let address = addr
++        .or(new.into())
++        .unwrap_or_else(|| cur.map(|c| c.address()).unwrap_or(Ipv4Address::UNSPECIFIED));
 +    let (address, prefix) = match (addr, netmask) {
 +        (Some(a), _) => (a, cur.map(|c| c.prefix_len()).unwrap_or(24)),
 +        (None, Some(m)) => {
@@ -238,13 +246,10 @@ index 6b765d91..98ff111f 100644
 +    iface.set_ipv4_cidr(Ipv4Cidr::new(address, prefix));
 +    route::reload();
 +    Ok(0)
-+}
-+
-+
- pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
-     use ioctl_defs::*;
+ }
  
-@@ -68,6 +136,56 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+@@ -68,6 +145,56 @@ pub(super) fn ipv4_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
              cmd.write(&ifreq)?;
              Ok(0)
          }
@@ -302,15 +307,18 @@ index 6b765d91..98ff111f 100644
      })
  }
 diff --git a/kernel/core/src/net/socket/util/ioctl.rs b/kernel/core/src/net/socket/util/ioctl.rs
-index a0bcae63..2464ec26 100644
+index a0bcae63..1eac9bf1 100644
 --- a/kernel/core/src/net/socket/util/ioctl.rs
 +++ b/kernel/core/src/net/socket/util/ioctl.rs
-@@ -18,12 +18,13 @@ use crate::{
+@@ -18,12 +18,16 @@ use crate::{
  
  mod ioctl_defs {
      use super::{CIfConf, CIfReq};
 -    use crate::{ioc, util::ioctl::InOutData};
-+    use crate::{ioc, util::ioctl::{InData, InOutData}};
++    use crate::{
++        ioc,
++        util::ioctl::{InData, InOutData},
++    };
  
      // Reference: <https://elixir.bootlin.com/linux/v7.1/source/include/uapi/linux/sockios.h#L56>.
      pub(super) type GetIfName       = ioc!(SIOCGIFNAME,     0x8910, InOutData<CIfReq>);
@@ -320,7 +328,7 @@ index a0bcae63..2464ec26 100644
      pub(super) type GetIfMetric     = ioc!(SIOCGIFMETRIC,   0x891D, InOutData<CIfReq>);
      pub(super) type GetIfMtu        = ioc!(SIOCGIFMTU,      0x8921, InOutData<CIfReq>);
      pub(super) type GetIfHwAddr     = ioc!(SIOCGIFHWADDR,   0x8927, InOutData<CIfReq>);
-@@ -73,6 +74,13 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
+@@ -73,6 +77,13 @@ fn network_device_ioctl(raw_ioctl: RawIoctl) -> Result<i32> {
              cmd.write(&ifreq)?;
              Ok(0)
          }
@@ -334,7 +342,7 @@ index a0bcae63..2464ec26 100644
          cmd @ GetIfFlags => {
              let mut ifreq = cmd.read()?;
              let iface = ifreq.get_iface_by_name()?;
-@@ -265,6 +273,15 @@ impl CIfReq {
+@@ -265,6 +276,17 @@ impl CIfReq {
          self.data = CIfReqData::new_addr(socket_addr);
      }
  
@@ -344,14 +352,16 @@ index a0bcae63..2464ec26 100644
 +        if sa.family != CSocketAddrFamily::AF_INET as u16 {
 +            return_errno_with_message!(Errno::EAFNOSUPPORT, "ifr_addr is not AF_INET");
 +        }
-+        Ok(Ipv4Address::new(sa.data[2], sa.data[3], sa.data[4], sa.data[5]))
++        Ok(Ipv4Address::new(
++            sa.data[2], sa.data[3], sa.data[4], sa.data[5],
++        ))
 +    }
 +
      pub(in crate::net::socket) fn get_iface_by_name(&mut self) -> Result<&'static Arc<Iface>> {
          iter_all_ifaces()
              .find(|iface| iface.name() == &self.name)
 diff --git a/kernel/libs/aster-bigtcp/src/iface/common.rs b/kernel/libs/aster-bigtcp/src/iface/common.rs
-index ac4a0380..c5882f1d 100644
+index ac4a0380..2432c3db 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/common.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/common.rs
 @@ -16,7 +16,7 @@ use int_to_c_enum::TryFromInt;
@@ -359,7 +369,7 @@ index ac4a0380..c5882f1d 100644
  use smoltcp::{
      iface::{Context, Route},
 -    wire::{IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
-+    wire::{Ipv4Address, IpAddress, IpEndpoint, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
++    wire::{IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr},
  };
  
  use super::{
@@ -401,7 +411,7 @@ index 8787f0a4..1f1d93b0 100644
      pub fn routes(&self) -> Vec<Route> {
          self.common().routes()
 diff --git a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
-index 5c9c197a..1b883d60 100644
+index 5c9c197a..b96f6bfb 100644
 --- a/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 +++ b/kernel/libs/aster-bigtcp/src/iface/poll_iface.rs
 @@ -57,6 +57,27 @@ impl<E: Ext> PollableIface<E> {
@@ -432,3 +442,41 @@ index 5c9c197a..1b883d60 100644
      pub(super) fn routes(&mut self) -> Vec<Route> {
          let mut routes = Vec::new();
          self.interface.routes_mut().update(|route_entries| {
+@@ -84,7 +105,7 @@ impl<E: Ext> PollableIface<E> {
+     pub(crate) fn update_next_poll_at_ms(
+         &mut self,
+         socket: &Arc<TcpConnectionBg<E>>,
+-        poll_at: smoltcp::socket::PollAt,
++        poll_at: PollAt,
+     ) -> NeedIfacePoll {
+         self.pending_conns.update_next_poll_at_ms(socket, poll_at)
+     }
+@@ -168,7 +189,7 @@ impl<E: Ext> PollableIfaceMut<'_, E> {
+     pub(crate) fn update_next_poll_at_ms(
+         &mut self,
+         socket: &Arc<TcpConnectionBg<E>>,
+-        poll_at: smoltcp::socket::PollAt,
++        poll_at: PollAt,
+     ) -> NeedIfacePoll {
+         self.pending_conns.update_next_poll_at_ms(socket, poll_at)
+     }
+@@ -272,15 +293,15 @@ impl<E: Ext> PendingConnSet<E> {
+     fn update_next_poll_at_ms(
+         &mut self,
+         socket: &Arc<TcpConnectionBg<E>>,
+-        poll_at: smoltcp::socket::PollAt,
++        poll_at: PollAt,
+     ) -> NeedIfacePoll {
+         let key = socket.poll_key();
+         let old_poll_at_ms = key.next_poll_at_ms.load(Ordering::Relaxed);
+ 
+         let new_poll_at_ms = match poll_at {
+-            smoltcp::socket::PollAt::Now => PollKey::IMMEDIATE_VAL,
+-            smoltcp::socket::PollAt::Time(instant) => instant.total_millis() as u64,
+-            smoltcp::socket::PollAt::Ingress => PollKey::INACTIVE_VAL,
++            PollAt::Now => PollKey::IMMEDIATE_VAL,
++            PollAt::Time(instant) => instant.total_millis() as u64,
++            PollAt::Ingress => PollKey::INACTIVE_VAL,
+         };
+ 
+         // Fast path: There is nothing to update.

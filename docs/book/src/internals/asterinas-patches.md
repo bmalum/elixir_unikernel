@@ -335,6 +335,13 @@ Pull requests against `asterinas/asterinas`, opened 2026-10-10:
 | 0007 | [#3985](https://github.com/asterinas/asterinas/pull/3985) NVMe on EBS |
 | 0008 | [#3987](https://github.com/asterinas/asterinas/pull/3987) ACPI power button, S5 (on top of #3986) |
 
+Upstream CI (`make check`) runs rustfmt and clippy with warnings as errors;
+the patches are formatted with `tools/format_all.sh` and clippy-clean as of
+the 2026-07-21 nightly (`is_multiple_of`, let chains, `while let`). Two
+tests in that CI are known flaky and unrelated to these changes:
+`ostd::arch::vm::vmx::vmcs::test::switch_and_reuse_vmcs` (ktest) and LTP
+`epoll_wait04` (a 5 ms timing bound under TCG).
+
 When one is merged upstream, bump `ASTERINAS_REF` and delete the patch;
 `build-asterinas.sh` fails loudly if a remaining patch no longer applies. 0005 is a new crate
 rather than a fix and would go upstream as a pull request adding

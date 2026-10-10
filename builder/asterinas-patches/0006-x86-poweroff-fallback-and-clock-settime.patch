@@ -163,7 +163,7 @@ index e2639003..abc8af1c 100644
  
  use crate::prelude::*;
 diff --git a/kernel/core/src/time/system_time.rs b/kernel/core/src/time/system_time.rs
-index 1ed4acf0..2b64b809 100644
+index 1ed4acf0..bbd425c7 100644
 --- a/kernel/core/src/time/system_time.rs
 +++ b/kernel/core/src/time/system_time.rs
 @@ -1,6 +1,9 @@
@@ -177,7 +177,7 @@ index 1ed4acf0..2b64b809 100644
  
  use aster_time::{read_monotonic_time, read_start_time};
  use spin::Once;
-@@ -15,6 +18,45 @@ pub(crate) struct SystemTime(PrimitiveDateTime);
+@@ -15,6 +18,46 @@ pub(crate) struct SystemTime(PrimitiveDateTime);
  pub(crate) static START_TIME: Once<SystemTime> = Once::new();
  pub(super) static START_TIME_AS_DURATION: Once<Duration> = Once::new();
  
@@ -213,7 +213,8 @@ index 1ed4acf0..2b64b809 100644
 +fn apply_adjust(time: SystemTime) -> SystemTime {
 +    let adjust = realtime_adjust();
 +    if adjust >= 0 {
-+        time.checked_add(Duration::from_nanos(adjust as u64)).unwrap_or(time)
++        time.checked_add(Duration::from_nanos(adjust as u64))
++            .unwrap_or(time)
 +    } else {
 +        time.checked_sub(Duration::from_nanos(adjust.unsigned_abs()))
 +            .unwrap_or(time)
@@ -223,7 +224,7 @@ index 1ed4acf0..2b64b809 100644
  pub(super) fn init() {
      let start_time = convert_system_time(read_start_time()).unwrap();
      START_TIME_AS_DURATION
-@@ -41,11 +83,13 @@ impl SystemTime {
+@@ -41,11 +84,13 @@ impl SystemTime {
      /// Returns the current system time
      pub(crate) fn now() -> Self {
          // The get real time result should always be valid
@@ -242,7 +243,7 @@ index 1ed4acf0..2b64b809 100644
      }
  
      /// Add a duration to self. If the result does not exceed inner bounds return Some(t), else return None.
-@@ -55,7 +99,6 @@ impl SystemTime {
+@@ -55,7 +100,6 @@ impl SystemTime {
      }
  
      /// Subtract a duration from self. If the result does not exceed inner bounds return Some(t), else return None.
@@ -251,7 +252,7 @@ index 1ed4acf0..2b64b809 100644
          let duration = convert_to_time_duration(duration);
          self.0.checked_sub(duration).map(SystemTime)
 diff --git a/kernel/core/src/vdso.rs b/kernel/core/src/vdso.rs
-index 8cfd879a..66ccb652 100644
+index 8cfd879a..497b0a12 100644
 --- a/kernel/core/src/vdso.rs
 +++ b/kernel/core/src/vdso.rs
 @@ -30,6 +30,7 @@ use crate::{
@@ -300,14 +301,17 @@ index 8cfd879a..66ccb652 100644
          }
      }
  }
-@@ -354,6 +352,32 @@ impl Vdso {
+@@ -354,6 +352,35 @@ impl Vdso {
  }
  
  /// Updates instants with respect to high-resolution clocks in vDSO data.
 +/// The realtime clock as (seconds, nanoseconds) for a monotonic `instant`:
 +/// boot time plus the instant plus the `clock_settime` adjustment.
 +fn realtime_parts(instant: Instant) -> (u64, u64) {
-+    let base = Duration::new(instant.secs() + START_SECS_COUNT.get().unwrap(), instant.nanos());
++    let base = Duration::new(
++        instant.secs() + START_SECS_COUNT.get().unwrap(),
++        instant.nanos(),
++    );
 +    let adjust = realtime_adjust();
 +    let adjusted = if adjust >= 0 {
 +        base + Duration::from_nanos(adjust as u64)
