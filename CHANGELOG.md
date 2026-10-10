@@ -89,7 +89,8 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
 - IPv6 probes (`uniapp.probe_ipv6=1`): loopback works on both kernels; no
   SLAAC/DHCPv6, documented. Hibernation documented as unsupported.
 - `scripts/upstream-branches.sh`: the patches as topic branches on the
-  Asterinas fork for upstream pull requests.
+  Asterinas fork; upstream pull requests asterinas/asterinas #3983 to #3989
+  opened from them.
 
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.

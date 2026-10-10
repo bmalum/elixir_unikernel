@@ -321,8 +321,22 @@ upstreamable unit (`fix/bind-unspecified-address`,
 `fix/timerfd-settime-readiness`, `feat/net-runtime-ifconfig-dhcp`,
 `feat/ena-driver`, `feat/x86-poweroff-clock-settime`,
 `fix/nvme-mqes-number-of-queues`, `feat/acpi-power-button-s5`) plus
-`elixir-unikernel-all`; the commit messages are these sections. Open the
-pull requests from those branches. 0005 is a new crate
+`elixir-unikernel-all`; the commit messages are these sections.
+
+Pull requests against `asterinas/asterinas`, opened 2026-10-10:
+
+| Patches | PR |
+|---|---|
+| 0001 | [#3983](https://github.com/asterinas/asterinas/pull/3983) bind() to 0.0.0.0 |
+| 0002 | [#3984](https://github.com/asterinas/asterinas/pull/3984) timerfd readiness |
+| 0003, 0004 | [#3988](https://github.com/asterinas/asterinas/pull/3988) runtime ifconfig, DHCP |
+| 0005, 0009 | [#3989](https://github.com/asterinas/asterinas/pull/3989) ENA driver (on top of #3988) |
+| 0006 | [#3986](https://github.com/asterinas/asterinas/pull/3986) reboot fallback, clock_settime |
+| 0007 | [#3985](https://github.com/asterinas/asterinas/pull/3985) NVMe on EBS |
+| 0008 | [#3987](https://github.com/asterinas/asterinas/pull/3987) ACPI power button, S5 (on top of #3986) |
+
+When one is merged upstream, bump `ASTERINAS_REF` and delete the patch;
+`build-asterinas.sh` fails loudly if a remaining patch no longer applies. 0005 is a new crate
 rather than a fix and would go upstream as a pull request adding
 `kernel/core/comps/ena` plus the two-driver selection in `iface/init.rs`. To send them: open issues on
 [asterinas/asterinas](https://github.com/asterinas/asterinas) with the C
