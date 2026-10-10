@@ -1,5 +1,5 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 454741af..b1504d11 100644
+index 794d0398..583a7c04 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -267,6 +267,7 @@ smoltcp = { git = "https://github.com/asterinas/smoltcp", tag = "r_2026-08-11_1b

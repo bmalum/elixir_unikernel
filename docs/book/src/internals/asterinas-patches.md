@@ -4,7 +4,7 @@
 to the Asterinas checkout before building. The patches are small, were found
 by running this image, and should go upstream. Until then they
 are documented here so that nobody is surprised that the kernel is not
-pristine `3d85cb4`.
+pristine `ec5bb9e`.
 
 ## 0001: bind() to the unspecified address
 
@@ -172,15 +172,19 @@ does not apply.
 
 Two unrelated small changes, both needed to run unattended on EC2.
 
-Restart: `sys_reboot` existed, and `kernel/core/src/arch/x86/power.rs`
-already tried the ACPI reset register and then the i8042 controller. On
+Restart: `sys_reboot` existed, and the kernel already registered the ACPI
+reset register and the i8042 controller as restart handlers (upstream's
+`register_restart_handler!` registry, tried in descending priority). On
 Nitro neither exists (no reset register in the FADT, no keyboard
 controller), so `reboot(2)` fell through to `machine_halt` and the instance
-sat there. The patch adds `ostd::arch::triple_fault` (load an empty IDT,
-`int3`) as the last resort Linux uses too, and installs the same chain as
-the power-off handler, because without ACPI AML there is no S5: a guest that
-asks to power off reboots instead of hanging with a dead console. Under QEMU
-OSTD installs its `isa-debug-exit` handler first, so tests still exit.
+sat there. The patch fills in `ostd::arch::power::try_restart` (upstream
+left a TODO there) with a triple fault, the last resort Linux uses too: load
+an empty IDT and `int3`. The kernel registers it at `Priority::LOW` and
+moves the i8042 reset to `Priority::new(1)` so the order stays ACPI, i8042,
+triple fault. A `Priority::LOW` power-off handler falls back to a restart:
+without ACPI AML there is no S5 (until patch 0008), and a guest that asks
+to power off should reboot instead of hanging with a dead console. Under
+QEMU OSTD's `isa-debug-exit` handler is registered at `HIGH` and wins.
 
 Wall clock: there was no `clock_settime`/`settimeofday`; the realtime clock
 was boot time (from the RTC) plus the monotonic counter. The patch keeps
@@ -241,7 +245,8 @@ The patch adds two things, both without an AML interpreter:
 - `kernel/core/src/arch/x86/power.rs` enables `PWRBTN_EN`, polls
   `PM1_STS.PWRBTN_STS` from the timer tick every 50 ms (the SCI stays masked
   at the IOAPIC, so no interrupt routing is needed), clears it and sends
-  `SIGPWR` to PID 1, at most once per 5 s. `poweroff` writes `SLP_TYP` and
+  `SIGPWR` to PID 1, at most once per 5 s. A power-off handler at
+  `Priority::FIRMWARE` writes `SLP_TYP` and
   `SLP_EN` to the PM1 control registers before falling back to a reset.
 
 A side fix in `ostd`: the "running in QEMU" check accepted the `KVMKVMKVM`
@@ -313,7 +318,7 @@ patch.
 
 ## Reporting upstream
 
-The patches are `git diff` output against `3d85cb4`, apply in order with
+The patches are `git diff` output against `ec5bb9e`, apply in order with
 `git apply`, and some depend on earlier ones (0004 on 0003, 0005 and 0009
 on 0003/0004, 0008 on 0006). `scripts/upstream-branches.sh` turns them into
 commits on the fork `github.com/bmalum/asterinas`, one topic branch per

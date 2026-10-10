@@ -19,14 +19,15 @@ mkdir -p "$BUILD/asterinas"
 if [ ! -d "$SRC/.git" ]; then
   git clone --filter=blob:none https://github.com/asterinas/asterinas.git "$SRC"
 fi
+# Start from a pristine checkout: drop the previous run's patches and leftover
+# untracked files (a stale new file makes `git apply` refuse the patch that
+# adds it) before switching refs, or the checkout refuses on a dirty tree.
+git -C "$SRC" checkout -q -- .
+git -C "$SRC" clean -fdq -- kernel ostd Cargo.toml Cargo.lock Components.toml
 git -C "$SRC" fetch -q origin "$REF" 2>/dev/null || git -C "$SRC" fetch -q origin
 git -C "$SRC" checkout -q --detach "$REF" || git -C "$SRC" checkout -q --detach FETCH_HEAD
 echo "asterinas at $(git -C "$SRC" log -1 --format='%h %ad %s' --date=short)"
 # Local patches (see builder/asterinas-patches/*.patch for the rationale).
-# Start from the pristine checkout: drop local edits and leftover untracked
-# files (a stale new file makes `git apply` refuse the patch that adds it).
-git -C "$SRC" checkout -q -- .
-git -C "$SRC" clean -fdq -- kernel Cargo.toml Components.toml
 PATCHES=$(cd "$(dirname "$0")/../builder/asterinas-patches" && pwd)
 for p in "$PATCHES"/*.patch; do
   [ -f "$p" ] || continue

@@ -1,46 +1,43 @@
+diff --git a/kernel/comps/i8042/src/lib.rs b/kernel/comps/i8042/src/lib.rs
+index 26a2d8a5..cbfae855 100644
+--- a/kernel/comps/i8042/src/lib.rs
++++ b/kernel/comps/i8042/src/lib.rs
+@@ -40,4 +40,5 @@ fn try_cpu_reset(_code: ExitCode) {
+         controller.lock().reset_cpu();
+     }
+ }
+-register_restart_handler!(try_cpu_reset, Priority::LOW);
++// Above the triple fault (`Priority::LOW`), which must stay the last resort.
++register_restart_handler!(try_cpu_reset, Priority::new(1));
 diff --git a/kernel/core/src/arch/x86/power.rs b/kernel/core/src/arch/x86/power.rs
-index 6f75bfa8..b3999045 100644
+index 0655a261..5dd490c3 100644
 --- a/kernel/core/src/arch/x86/power.rs
 +++ b/kernel/core/src/arch/x86/power.rs
-@@ -3,7 +3,7 @@
- use ostd::{
-     arch::{device::io_port::WriteOnlyAccess, kernel::ACPI_INFO},
-     io::IoPort,
--    power::{ExitCode, inject_restart_handler},
-+    power::{ExitCode, inject_poweroff_handler, inject_restart_handler},
- };
- use spin::Once;
+@@ -24,6 +24,24 @@ crate::register_poweroff_handler!(
+     crate::power::Priority::HIGH
+ );
  
-@@ -25,6 +25,22 @@ fn try_acpi_reset(_code: ExitCode) {
- fn try_reset(code: ExitCode) {
-     try_acpi_reset(code);
-     aster_i8042::try_cpu_reset(code);
-+    // Still here: neither ACPI nor the keyboard controller reset the machine
-+    // (on EC2 Nitro the i8042 is absent). A triple fault is the last resort
-+    // Linux uses too: load an empty IDT and raise an interrupt.
-+    ostd::arch::triple_fault();
-+}
++// The triple fault comes after the i8042 controller (which registers at `Priority::new(1)`), as
++// the last resort. It is the only method that works on machines without an ACPI reset register
++// or a keyboard controller, such as EC2 Nitro instances.
++crate::register_restart_handler!(
++    ostd::arch::power::try_restart,
++    crate::power::Priority::LOW
++);
 +
-+/// Powers the machine off.
++/// Powers off by restarting.
 +///
-+/// Without ACPI AML we cannot enter S5 on real hardware or on EC2; a VMM such
-+/// as QEMU gets its `isa-debug-exit` handler injected by OSTD first and that
-+/// one wins. Here we fall back to a reset, so that a guest whose init
-+/// process asked for `poweroff` restarts instead of hanging with its
-+/// console dead. On EC2 a restart re-runs the same AMI, which is the
-+/// behaviour an auto-scaling group wants from a crashed node.
-+fn try_poweroff_by_reset(code: ExitCode) {
-+    try_reset(code);
- }
- 
++/// Without an ACPI AML interpreter the kernel cannot enter S5 on real hardware or on EC2, so a
++/// guest whose init process asked for `poweroff` would otherwise hang with a dead console. A
++/// restart re-runs the same image, which is what an auto-scaling group wants from a crashed node.
++fn try_poweroff_by_restart(code: ExitCode) {
++    ostd::power::restart(code);
++}
++crate::register_poweroff_handler!(try_poweroff_by_restart, crate::power::Priority::LOW);
++
  pub(super) fn init() {
-@@ -39,4 +55,6 @@ pub(super) fn init() {
-     }
+     let acpi_info = ACPI_INFO.get().unwrap();
  
-     inject_restart_handler(try_reset);
-+    // `Once`: only takes effect when OSTD did not already install the QEMU handler.
-+    inject_poweroff_handler(try_poweroff_by_reset);
- }
 diff --git a/kernel/core/src/syscall/arch/x86.rs b/kernel/core/src/syscall/arch/x86.rs
 index bb8cc1db..35f30a63 100644
 --- a/kernel/core/src/syscall/arch/x86.rs
@@ -337,26 +334,29 @@ index 8cfd879a..497b0a12 100644
  fn update_vdso_high_res_instant(instant: Instant, instant_cycles: u64) {
      VDSO.get()
          .unwrap()
-diff --git a/ostd/src/arch/x86/mod.rs b/ostd/src/arch/x86/mod.rs
-index ab9fb40e..1825b66c 100644
---- a/ostd/src/arch/x86/mod.rs
-+++ b/ostd/src/arch/x86/mod.rs
-@@ -126,6 +126,28 @@ pub(crate) unsafe fn init_on_ap() {
-     timer::init_on_ap();
- }
+diff --git a/ostd/src/arch/x86/power.rs b/ostd/src/arch/x86/power.rs
+index 3d1dd8ba..b5703240 100644
+--- a/ostd/src/arch/x86/power.rs
++++ b/ostd/src/arch/x86/power.rs
+@@ -66,7 +66,25 @@ pub fn try_poweroff(code: crate::power::ExitCode) {
  
-+/// Returns the frequency of TSC. The unit is Hz.
-+/// Resets the machine by triple-faulting the current CPU.
+ /// Attempts to restart the system using an architecture-specific mechanism.
+ ///
+-/// On x86, this function currently does nothing and returns.
++/// On x86, this triple-faults the current CPU: it loads an empty IDT and raises a software
++/// interrupt, which the CPU cannot deliver, nor the resulting double fault, so it resets. This
++/// is the last-resort reboot method on x86 (Linux does the same) and the only one that works
++/// where neither an ACPI reset register nor an i8042 controller exists, such as on EC2 Nitro.
 +///
-+/// The last-resort reboot method, used when neither the ACPI reset register
-+/// nor the i8042 controller exist (e.g. on EC2 Nitro). Loads an empty IDT and
-+/// raises a software interrupt; the CPU cannot deliver it, cannot deliver the
-+/// resulting double fault either, and resets. Does not return.
-+pub fn triple_fault() -> ! {
-+    // SAFETY: We are intentionally bringing the machine down. Nothing runs after
-+    // this on the current CPU; other CPUs stop when the chipset resets.
++/// This method does not return. Nothing runs after it on the current CPU, and the other CPUs
++/// stop when the chipset resets.
+ pub fn try_restart(_code: crate::power::ExitCode) {
+-    // TODO: Add an OSTD-level restart mechanism for x86.
++    let null_idt: [u8; 10] = [0; 10];
++
++    // SAFETY: We are intentionally bringing the machine down. The empty IDT guarantees that the
++    // `int3` below cannot be handled and the CPU resets instead.
 +    unsafe {
-+        let null_idt: [u8; 10] = [0; 10];
 +        core::arch::asm!(
 +            "cli",
 +            "lidt [{}]",
@@ -365,8 +365,4 @@ index ab9fb40e..1825b66c 100644
 +            options(nostack, noreturn)
 +        );
 +    }
-+}
-+
- /// Returns the frequency of TSC. The unit is Hz.
- pub fn tsc_freq() -> u64 {
-     use core::sync::atomic::Ordering;
+ }

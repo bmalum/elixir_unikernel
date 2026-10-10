@@ -90,7 +90,10 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
   SLAAC/DHCPv6, documented. Hibernation documented as unsupported.
 - `scripts/upstream-branches.sh`: the patches as topic branches on the
   Asterinas fork; upstream pull requests asterinas/asterinas #3983 to #3989
-  opened from them.
+  opened from them. Asterinas base moved from `3d85cb4` to `ec5bb9e`
+  (2026-09-17); patch 0006 uses upstream's new restart/poweroff handler
+  registry and fills in `ostd::arch::power::try_restart`, 0008 registers
+  S5 at `Priority::FIRMWARE`. Patches are rustfmt- and clippy-clean.
 
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.

@@ -34,7 +34,7 @@
 |---|---|---|
 | `OTP_TAG` | `OTP-29.1.1` | Erlang/OTP git tag |
 | `ELIXIR_TAG` | `v1.20.4` | Elixir git tag |
-| `ASTERINAS_REF` | `3d85cb4` | Asterinas commit or tag |
+| `ASTERINAS_REF` | `ec5bb9e` | Asterinas commit or tag |
 | `ALPINE` | `3.22` | Alpine version for the builder and the x86-64 sysroot (OpenSSL, zstd, musl versions follow from it) |
 | `JOBS` | 8 | parallelism inside the builder |
 | `PLATFORM` | Docker server's | container platform; the build is native on arm64 and x86-64 |

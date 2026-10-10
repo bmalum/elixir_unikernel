@@ -1,5 +1,48 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f8399dd8..de5bba4a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -86,6 +86,7 @@ dependencies = [
+  "dma-pool",
+  "int-to-c-enum",
+  "jhash",
++ "log",
+  "ostd",
+  "ostd-pod",
+  "smoltcp",
+@@ -141,6 +142,7 @@ dependencies = [
+  "aster-cmdline",
+  "aster-console",
+  "aster-device",
++ "aster-ena",
+  "aster-framebuffer",
+  "aster-fuse",
+  "aster-input",
+@@ -230,6 +232,22 @@ dependencies = [
+  "zerocopy",
+ ]
+ 
++[[package]]
++name = "aster-ena"
++version = "0.1.0"
++dependencies = [
++ "aster-bigtcp",
++ "aster-cmdline",
++ "aster-network",
++ "aster-pci",
++ "component",
++ "dma-pool",
++ "ostd",
++ "ostd-pod",
++ "spin",
++ "zerocopy",
++]
++
+ [[package]]
+ name = "aster-framebuffer"
+ version = "0.1.0"
 diff --git a/Cargo.toml b/Cargo.toml
-index b1504d11..bd5b5269 100644
+index 583a7c04..216e3918 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -40,6 +40,7 @@ members = [
@@ -18,7 +61,7 @@ index b1504d11..bd5b5269 100644
      "kernel/core/comps/network",
      "kernel/core/comps/nvme",
      "kernel/core/comps/pci",
-@@ -182,6 +184,7 @@ aster-i8042 = { path = "kernel/core/comps/i8042" }
+@@ -182,6 +184,7 @@ aster-framebuffer = { path = "kernel/core/comps/framebuffer" }
  aster-input = { path = "kernel/core/comps/input" }
  aster-logger = { path = "kernel/core/comps/logger" }
  aster-mlsdisk = { path = "kernel/core/comps/mlsdisk" }
@@ -39,7 +82,7 @@ index 4c56d27b..7a82bb6f 100644
  i8042 = { name = "aster-i8042" }
  input = { name = "aster-input" }
 diff --git a/kernel/core/Cargo.toml b/kernel/core/Cargo.toml
-index 5cc66cb4..f48b1703 100644
+index ccda2552..c0314e63 100644
 --- a/kernel/core/Cargo.toml
 +++ b/kernel/core/Cargo.toml
 @@ -12,6 +12,7 @@ aster-block.workspace = true
@@ -49,7 +92,7 @@ index 5cc66cb4..f48b1703 100644
 +aster-ena.workspace = true
  aster-framebuffer.workspace = true
  aster-fuse.workspace = true
- aster-i8042.workspace = true
+ aster-input.workspace = true
 diff --git a/kernel/core/comps/ena/Cargo.toml b/kernel/core/comps/ena/Cargo.toml
 new file mode 100644
 index 00000000..084d49b4

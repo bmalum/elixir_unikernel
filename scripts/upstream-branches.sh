@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Turns builder/asterinas-patches into commits on upstream Asterinas 3d85cb44,
+# Turns builder/asterinas-patches into commits on upstream Asterinas ec5bb9ed,
 # one topic branch per upstreamable unit plus `elixir-unikernel-all`, in a
 # clone of the fork at $FORK (default build/aster-fork, github.com/bmalum/asterinas).
 # Commit messages come from the manual's patch chapter (build/patch-msgs, see
@@ -10,7 +10,7 @@ set -euo pipefail
 PUSH=${1:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 FORK=${FORK:-$PWD/build/aster-fork}
-BASE=3d85cb44263808723ee46c5dbbd06b330a2b3204
+BASE=ec5bb9ed798851b4c1854e791341321902ac8bc9
 P=$ROOT/builder/asterinas-patches
 M=$ROOT/build/patch-msgs
 
@@ -40,7 +40,7 @@ $(cat "$M/$n.txt")
 
 Found while running Erlang/Elixir (elixir_unikernel) on Asterinas, where this
 is applied as builder/asterinas-patches/$(basename "$f").
-Base: 3d85cb44. Project: https://github.com/bmalum/elixir_unikernel
+Base: ec5bb9ed. Project: https://github.com/bmalum/elixir_unikernel
 MSG
 }
 area() { case $1 in 0001|0003|0004) echo net;; 0002) echo time;; 0005|0009) echo ena;; 0006) echo x86;; 0007) echo nvme;; 0008) echo acpi;; esac; }
