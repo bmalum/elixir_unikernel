@@ -96,6 +96,8 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   EXTRA+=(--user-data "uniapp.cloudwatch=1
 uniapp.log_group=/elixir_unikernel/smoke
 uniapp.data=auto
+uniapp.write_test=nosync.txt
+uniapp.sync_s=10
 uniapp.halt_after_first_boot=75000${ENA_USERDATA:+
 $ENA_USERDATA}")
   echo "data volume from $DATA_SNAPSHOT, role $ROLE, user data with uniapp.cloudwatch=1"
@@ -204,11 +206,16 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   grep -q 'ntp: synced' "$LOG" && ok "$(grep -m1 'ntp: synced' "$LOG" | sed 's/^\[init\] //')" || bad "no NTP sync: $(grep -m1 'ntp:' "$LOG" || echo missing)"
   grep -q 'data: .* mounted on /data' "$LOG" && ok "$(grep -m1 'mounted on /data' "$LOG" | sed 's/^\[init\] //')" || bad "data volume not mounted: $(grep -m1 'data:' "$LOG" || echo missing)"
   grep -q '^DATA boot_count 1 ' "$LOG" && ok "boot_count 1 on /data" || bad "boot counter: $(grep -m1 '^DATA' "$LOG" || echo missing)"
+  grep -q '^DATA wrote /data/nosync.txt' "$LOG" && ok "test file written without fsync (durability check after the reboot)" || bad "no 'DATA wrote' line"
   grep -q '^CLOUDWATCH ' "$LOG" && ok "$(grep -m1 '^CLOUDWATCH' "$LOG")" || bad "CloudWatch shipper not started"
-  grep -qE 'ena: .* ready, [0-9]+ queue pairs?' "$LOG" && ok "$(grep -m1 -oE 'ena: .* ready, .*' "$LOG")" || bad "no ENA ready line"
+  if [ "${LABEL#linux}" = "$LABEL" ]; then   # Asterinas: our driver's ready line (Linux has its own ena module)
+    grep -qE 'ena: .* ready, [0-9]+ queue pairs?' "$LOG" && ok "$(grep -m1 -oE 'ena: .* ready, .*' "$LOG")" || bad "no ENA ready line"
+  fi
   # ena.test_reset=40 (user data): the driver resets the device 40 s after init;
   # the data volume boot that follows at +75 s proves the NIC still works afterwards.
-  grep -q 'no keep-alive' "$LOG" && bad "keep-alive watchdog fired: $(grep -m1 'no keep-alive' "$LOG")" || ok "keep-alive watchdog quiet (AENQ keep-alives arriving)"
+  if [ "${LABEL#linux}" = "$LABEL" ]; then
+    grep -q 'no keep-alive' "$LOG" && bad "keep-alive watchdog fired: $(grep -m1 'no keep-alive' "$LOG")" || ok "keep-alive watchdog quiet (AENQ keep-alives arriving)"
+  fi
 
   # The VM exits (uniapp.eval above), /init reboots the machine, the second boot
   # must find the data volume with boot_count 1 and bump it.
@@ -222,6 +229,9 @@ if [ -n "${DATA_SNAPSHOT:-}" ]; then
   done
   grep -q 'beam.smp exited with status 0' "$LOG.reboot" && ok "$(grep -m1 'beam.smp exited' "$LOG.reboot" | sed 's/^\[init\] //'), then: $(grep -m1 -E '^\[init\] (rebooting|powering off)' "$LOG.reboot" | sed 's/^\[init\] //')" || bad "no 'beam.smp exited' line: $(grep -m1 'beam.smp' "$LOG.reboot" || echo missing)"
   if [ -n "$rebooted" ]; then ok "second boot: boot_count 2 on /data (${rebooted}s after launch)"; else bad "boot_count 2 not seen after the reboot: $(grep -m1 '^DATA' "$LOG.reboot" || echo missing)"; fi
+  # The un-fsync'd file must have been flushed by the periodic sync (uniapp.sync_s=10) before the VM exit.
+  hz2=$(curl -s --max-time 10 "http://$IP:8080/healthz" 2>/dev/null || true)
+  echo "$hz2" | grep -q '"nosync_file":true' && ok "nosync.txt survived the reboot (periodic sync)" || bad "nosync.txt missing after reboot: $(echo "$hz2" | cut -c1-100)"
 
   # CloudWatch: the stream exists and carries our log line and an EMF document.
   group=/elixir_unikernel/smoke

@@ -39,13 +39,17 @@ budget. Adding Phoenix costs 4 to 6 MB compressed.
   just nothing to execute.
 - NIFs loaded at runtime: no `dlopen`. OTP's `crypto` and `asn1` are linked
   statically.
-- Persistent storage: the initramfs is read-only; `/tmp` is RAM. A data
-  volume can be mounted at `/data` (ext2, `uniapp.data=`).
+- Persistent storage: the initramfs is read-only; `/tmp` is RAM. ext2 data
+  volumes can be mounted (`uniapp.data=`, `uniapp.mounts=`); no journal
+  (periodic `sync`, `fsync` for critical writes), no online resize, one
+  NVMe I/O queue of 32 entries on EBS.
 - Hot code upgrades: no writable release directory (and `-mode interactive`
   loads from the read-only tree anyway).
 - Terminfo: `TERM=dumb`, no colours in IEx.
-- IPv6: untested. DHCP: IPv4 only, one lease per boot (renewals are handled
-  by the kernel client on Asterinas; `/init` on Linux does not renew).
+- IPv6: sockets and loopback work; no SLAAC/DHCPv6, so no global address
+  without static configuration. DHCP: IPv4 only, one lease per boot
+  (renewals are handled by the kernel client on Asterinas; `/init` on Linux
+  does not renew).
 - EC2: x86-64 Nitro instances with ENA only (tested on t3.small). The ENA
   driver has checksum offload and up to 8 queue pairs with RSS but no LLQ
   or TSO; about 100 MB/s NIC to NIC with one pair. One NVMe I/O queue. No

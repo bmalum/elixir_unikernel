@@ -567,46 +567,105 @@ static void setup_time(void) {
     logmsg("ntp: %s did not answer; keeping the firmware clock", v);
 }
 
-/* ------------------------------------------------------------------ data volume */
+/* ------------------------------------------------------------------ data volumes
+ * uniapp.data=auto|/dev/X|off        mounts one ext2 volume on /data
+ * uniapp.mounts=DEV:DIR[,DEV:DIR...] mounts more (ext2, rw), e.g.
+ *                                    /dev/nvme2n1:/cache,LABEL=logs:/logs
+ * DEV may be LABEL=name (ext2 volume label, set by mkdata.sh -L).
+ * ext2 has no journal: writers should fsync; the supervisor also calls
+ * sync(2) every uniapp.sync_s seconds (default 30) and on exit, so an unclean
+ * stop loses at most that window. */
 static int g_data_mounted;
+static char g_mounted[8][64]; static int g_mounted_n;
 
-static int try_mount_data(const char *dev) {
-    mkdir("/data", 0755);
-    if (mount(dev, "/data", "ext2", 0, NULL) == 0) {
-        logmsg("data: %s mounted on /data (ext2, rw)", dev);
-        g_data_mounted = 1;
+/* Reads the ext2 volume label (superblock at 1024, s_volume_name at +120). */
+static int ext2_label(const char *dev, char *out, size_t n) {
+    int fd = open(dev, O_RDONLY); if (fd < 0) return -1;
+    unsigned char sb[1024 + 160];
+    ssize_t r = pread(fd, sb, sizeof sb, 0); close(fd);
+    if (r < (ssize_t)sizeof sb) return -1;
+    if (sb[1024 + 56] != 0x53 || sb[1024 + 57] != 0xEF) return -1;   /* not ext2 */
+    memcpy(out, sb + 1024 + 120, n < 16 ? n : 16); out[n < 16 ? n - 1 : 16] = 0;
+    return 0;
+}
+
+/* Resolves LABEL=name to a device node by scanning the candidates. */
+static const char *resolve_dev(const char *spec, char *buf, size_t n) {
+    if (strncmp(spec, "LABEL=", 6)) return spec;
+    const char *cands[] = { "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1", "/dev/nvme4n1", "/dev/vdb", "/dev/vdc", "/dev/vdd", "/dev/nvme0n1", "/dev/vda", NULL };
+    for (int i = 0; cands[i]; i++) {
+        char l[17]; if (access(cands[i], F_OK) == 0 && ext2_label(cands[i], l, sizeof l) == 0 && !strcmp(l, spec + 6)) {
+            snprintf(buf, n, "%s", cands[i]); return buf;
+        }
+    }
+    return NULL;
+}
+
+static int try_mount(const char *dev, const char *dir, const char *what) {
+    mkdir(dir, 0755);
+    if (mount(dev, dir, "ext2", 0, NULL) == 0) {
+        char l[17] = "";
+        ext2_label(dev, l, sizeof l);
+        logmsg("%s: %s mounted on %s (ext2, rw%s%s)", what, dev, dir, *l ? ", label " : "", l);
+        if (g_mounted_n < 8) snprintf(g_mounted[g_mounted_n++], 64, "%s", dir);
         return 0;
     }
     return -1;
 }
 
+static int try_mount_data(const char *dev) {
+    if (try_mount(dev, "/data", "data") == 0) { g_data_mounted = 1; return 0; }
+    return -1;
+}
+
 static void setup_data(void) {
     const char *v = param("uniapp.data");
-    if (!v || !strcmp(v, "off")) return;
-    if (strcmp(v, "auto")) {
-        if (try_mount_data(v) < 0) logmsg("data: mount %s: %s", v, strerror(errno));
-        return;
-    }
-    /* auto: the first block device that mounts as ext2. On EC2 the root volume
-       is nvme0n1 (GPT + FAT, not ext2, so the mount fails harmlessly) and a data
-       volume attached as /dev/sdf shows up as nvme1n1; under QEMU with a direct
-       kernel boot the data drive is the only NVMe and is nvme0n1. */
-    const char *cands[] = { "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1", "/dev/vdb", "/dev/vdc", "/dev/nvme0n1", "/dev/vda", NULL };
-    for (int attempt = 0; attempt < 20 && !g_data_mounted; attempt++) {
-        for (int i = 0; cands[i]; i++) {
-            if (access(cands[i], F_OK) < 0) continue;
-            if (try_mount_data(cands[i]) == 0) return;
-            if (errno != EINVAL) logmsg("data: mount %s: %s", cands[i], strerror(errno));
+    if (v && strcmp(v, "off")) {
+        if (strcmp(v, "auto")) {
+            char buf[64]; const char *dev = resolve_dev(v, buf, sizeof buf);
+            if (!dev) logmsg("data: no volume with %s", v);
+            else if (try_mount_data(dev) < 0) logmsg("data: mount %s: %s", dev, strerror(errno));
+        } else {
+            /* auto: the first block device that mounts as ext2. On EC2 the root volume
+               is nvme0n1 (GPT + FAT, not ext2, so the mount fails harmlessly) and a data
+               volume attached as /dev/sdf shows up as nvme1n1; under QEMU with a direct
+               kernel boot the data drive is the only NVMe and is nvme0n1. */
+            const char *cands[] = { "/dev/nvme1n1", "/dev/nvme2n1", "/dev/nvme3n1", "/dev/vdb", "/dev/vdc", "/dev/nvme0n1", "/dev/vda", NULL };
+            for (int attempt = 0; attempt < 20 && !g_data_mounted; attempt++) {
+                for (int i = 0; cands[i]; i++) {
+                    if (access(cands[i], F_OK) < 0) continue;
+                    if (try_mount_data(cands[i]) == 0) break;
+                    if (errno != EINVAL) logmsg("data: mount %s: %s", cands[i], strerror(errno));
+                }
+                if (g_data_mounted) break;
+                if (attempt == 0) logmsg("data: waiting for a data volume");
+                usleep(250 * 1000);
+            }
+            if (!g_data_mounted) logmsg("data: no ext2 data volume found; /data unavailable");
         }
-        if (attempt == 0) logmsg("data: waiting for a data volume");
-        usleep(250 * 1000);
     }
-    if (!g_data_mounted) logmsg("data: no ext2 data volume found; /data unavailable");
+    const char *m = param("uniapp.mounts");
+    if (!m) return;
+    char *dup = strdup(m);
+    for (char *tok = strtok(dup, ","); tok; tok = strtok(NULL, ",")) {
+        char *colon = strrchr(tok, ':');
+        if (!colon) { logmsg("mounts: bad entry %s (want DEV:DIR)", tok); continue; }
+        *colon = 0;
+        char buf[64]; const char *dev = resolve_dev(tok, buf, sizeof buf);
+        if (!dev) { logmsg("mounts: no volume with %s", tok); continue; }
+        if (try_mount(dev, colon + 1, "mounts") < 0) logmsg("mounts: mount %s on %s: %s", dev, colon + 1, strerror(errno));
+    }
+}
+
+static void unmount_all(void) {
+    sync();
+    for (int i = g_mounted_n - 1; i >= 0; i--) umount(g_mounted[i]);
 }
 
 /* ------------------------------------------------------------------ supervisor */
 static volatile sig_atomic_t g_power_button;
 static void on_sigpwr(int sig) { (void)sig; g_power_button = 1; }
+static void on_sigchld(int sig) { (void)sig; }
 
 /* Linux reports the ACPI power button as KEY_POWER on an evdev device (there
    is no signal); Asterinas sends SIGPWR instead. Watch both. */
@@ -642,8 +701,7 @@ static void poll_input_devices(void) {
 }
 
 static void power_action(const char *what) {
-    sync();
-    if (g_data_mounted) umount("/data");
+    unmount_all();
     if (!strcmp(what, "poweroff")) { logmsg("powering off"); reboot(RB_POWER_OFF); }
     else if (!strcmp(what, "halt")) { logmsg("halting"); reboot(RB_HALT_SYSTEM); for (;;) pause(); }
     else { logmsg("rebooting"); reboot(RB_AUTOBOOT); }
@@ -654,9 +712,11 @@ static void power_action(const char *what) {
 /* Waits for `child` while reaping any other orphans, resyncing the clock once
    an hour. Returns when `child` has exited. */
 static void supervise(pid_t child, int *status) {
-    time_t last_sync = time(NULL), term_sent = 0;
+    time_t last_sync = time(NULL), term_sent = 0, last_fssync = time(NULL);
+    const char *ss = param("uniapp.sync_s"); int sync_s = ss ? atoi(ss) : 30;
     open_input_devices();
     for (;;) {
+        if (g_mounted_n && sync_s > 0 && time(NULL) - last_fssync >= sync_s) { sync(); last_fssync = time(NULL); }
         int st; pid_t p = waitpid(-1, &st, WNOHANG);
         if (p == child) { *status = st; return; }
         if (p < 0 && errno == ECHILD) { *status = 0; return; }
@@ -672,7 +732,11 @@ static void supervise(pid_t child, int *status) {
             term_sent = time(NULL) + 1000;   /* once */
         }
         if (p == 0) {
-            if (g_power_button) usleep(200 * 1000); else usleep(250 * 1000);
+            /* Sleep until a child exits (SIGCHLD interrupts poll), a power
+               button event arrives on an input device, or the tick elapses. */
+            struct pollfd pfds[MAX_INPUT_FDS]; int np = 0;
+            for (int i = 0; i < g_input_n; i++) pfds[np++] = (struct pollfd){ .fd = g_input_fds[i], .events = POLLIN };
+            poll(pfds, np, g_power_button ? 200 : 1000);
             if (g_ntp && time(NULL) - last_sync >= 3600) {
                 int64_t ms = sntp_sync(g_ntp);
                 if (ms != INT64_MIN && (ms > 50 || ms < -50)) logmsg("ntp: correction %lld ms", (long long)ms);
@@ -732,6 +796,7 @@ int main(void) {
     setenv("ERL_CRASH_DUMP", g_data_mounted ? "/data/erl_crash.dump" : "/dev/null", 1);
     setenv("KERNEL_CMDLINE", cmdline, 1);
     if (g_data_mounted) setenv("UNIAPP_DATA", "/data", 1);
+    if (g_mounted_n) { char all[8 * 64] = ""; for (int i = 0; i < g_mounted_n; i++) { if (i) strcat(all, ","); strcat(all, g_mounted[i]); } setenv("UNIAPP_MOUNTS", all, 1); }
 
     static char beam[256];
     snprintf(beam, sizeof beam, "%s/beam.smp", bindir);
@@ -786,6 +851,7 @@ int main(void) {
     }
     close(0);
     signal(SIGPWR, on_sigpwr);
+    signal(SIGCHLD, on_sigchld);      /* only to interrupt poll(); waitpid does the reaping */
     signal(SIGINT, SIG_IGN); signal(SIGTERM, SIG_IGN);   /* only the power button stops PID 1 */
     int status = 0;
     supervise(child, &status);

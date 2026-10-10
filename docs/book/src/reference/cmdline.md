@@ -18,7 +18,11 @@ quotes if they contain spaces; a value cannot itself contain a double quote.
 | `uniapp.halt_after_first_boot=MS` | unset | sample app, test hook: exit the VM `MS` ms into the first boot of a data volume (`boot_count` 1) so a test can watch the restart path |
 | `uniapp.imds=1` | unset | EC2: query IMDSv2 for identity (`EC2_INSTANCE_ID`, `AWS_REGION`, ... in the environment) and user data. User-data lines `key=value` override command-line keys; the raw user data is in `/run/user-data` |
 | `uniapp.ntp=A.B.C.D\|off` | Amazon Time Sync when `imds=1`, else off | SNTP server; the clock is set at boot and resynced hourly |
-| `uniapp.data=auto\|/dev/X\|off` | unset | mount an ext2 data volume read-write at `/data` (`auto`: the first block device that mounts); exports `UNIAPP_DATA=/data`, crash dumps go to `/data/erl_crash.dump` |
+| `uniapp.data=auto\|/dev/X\|LABEL=name\|off` | unset | mount an ext2 data volume read-write at `/data` (`auto`: the first block device that mounts); exports `UNIAPP_DATA=/data`, crash dumps go to `/data/erl_crash.dump` |
+| `uniapp.mounts=DEV:DIR[,...]` | unset | more ext2 volumes, `DEV` a device node or `LABEL=name`; `UNIAPP_MOUNTS` lists the directories |
+| `uniapp.sync_s=N` | `30` | `/init` calls `sync(2)` every N seconds while volumes are mounted (0 disables) |
+| `uniapp.write_test=NAME` | unset | sample app, test hook: write `NAME` on the data volume without `fsync` 2 s after boot |
+| `uniapp.probe_ipv6=1` | unset | sample app: IPv6 loopback and address probes (`PROBE ipv6_*`) |
 | `uniapp.cloudwatch=1` | unset | sample app: ship the log to CloudWatch Logs and publish EMF metrics using the instance role (needs `imds=1`) |
 | `uniapp.log_group=NAME` | `/elixir_unikernel` | CloudWatch log group; the stream is the instance id |
 | `uniapp.health_port=N` | `8080` | sample app: port of `/healthz` and `/livez` |

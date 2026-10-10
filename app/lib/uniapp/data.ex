@@ -35,6 +35,26 @@ defmodule Uniapp.Data do
     end
   end
 
+  @doc """
+  Test hook: `uniapp.write_test=NAME` writes `NAME` under the data dir
+  **without** fsync, 2 s after boot, and prints `DATA wrote NAME`. The smoke
+  test kills the machine later and checks whether the periodic sync in
+  `/init` made the write durable.
+  """
+  def maybe_write_test do
+    with name when is_binary(name) <- Uniapp.Cmdline.get("uniapp.write_test"),
+         dir when is_binary(dir) <- dir() do
+      :timer.apply_after(2_000, __MODULE__, :write_test, [Path.join(dir, name)])
+    end
+
+    :ok
+  end
+
+  def write_test(path) do
+    File.write!(path, "written-without-fsync at #{DateTime.utc_now()}\n")
+    IO.puts("DATA wrote #{path}")
+  end
+
   @doc "The boot counter as bumped at start-up, or nil without a data volume."
   def boot_count, do: :persistent_term.get({__MODULE__, :boot_count}, nil)
 

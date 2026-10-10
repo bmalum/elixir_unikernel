@@ -174,10 +174,17 @@ second push 8 MB through the first's TCP echo and prints the sender's
   with `SIGTERM` (ERTS shuts the applications down in order), waits up to
   20 s and powers off through ACPI S5. Stops complete in about 15 s, reboots
   in about 45 s, instead of EC2's four-minute hard reset.
-- **State** lives on an EBS volume mounted at `/data` (`uniapp.data=auto`),
-  ext2, so write small files and `fsync`. `scripts/mkdata.sh` makes an empty
-  image, `scripts/ami-publish.py --snapshot-only` turns it into a snapshot to
-  launch from. `erl_crash.dump` lands there too.
+- **State** lives on EBS volumes: `uniapp.data=auto|/dev/X|LABEL=name`
+  mounts one at `/data`, `uniapp.mounts=LABEL=cache:/cache,/dev/nvme3n1:/logs`
+  mounts more (ext2, read-write; `UNIAPP_DATA`, `UNIAPP_MOUNTS` in the
+  environment). `scripts/mkdata.sh out.raw 64 mylabel` makes an empty image,
+  `scripts/ami-publish.py --snapshot-only` turns it into a snapshot to launch
+  from. ext2 has no journal: `/init` runs `sync(2)` every `uniapp.sync_s`
+  seconds (default 30) and on exit, so an unclean stop loses at most that
+  window; call `fsync` for anything that must not. Verified: a file written
+  without `fsync` survived a hard kill 30 s later under QEMU and a VM exit on
+  EC2. Growing a volume means creating a larger one and copying (no online
+  resize, no `resize2fs` in the image). `erl_crash.dump` lands on `/data`.
 - **Logs and metrics** go to CloudWatch from inside the BEAM
   (`uniapp.cloudwatch=1`, instance role with `logs:*` on the group): every
   `Logger` event is batched into `PutLogEvents`, metrics are EMF documents in
@@ -194,5 +201,10 @@ second push 8 MB through the first's TCP echo and prints the sender's
   reports 32 queue entries and rejects larger queues); it has one I/O queue
   and no interrupts tuning, fine for a boot counter and crash dumps, not for
   a database.
-- IPv6 is not used. Graviton (arm64), Xen-based instance types and
-  Marketplace publishing are out of scope.
+- IPv6: the stack handles IPv6 sockets (loopback verified on both kernels,
+  `uniapp.probe_ipv6=1`), but there is no SLAAC or DHCPv6 client, so an
+  instance in a dual-stack subnet gets no global address; static
+  configuration only. Hibernation (`--hibernation-options`) is not
+  supported: the kernel has no S4 and the image no swap.
+- Graviton (arm64), Xen-based instance types and Marketplace publishing are
+  out of scope.

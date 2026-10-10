@@ -98,6 +98,7 @@ defmodule Uniapp.Health do
       "schedulers" => :erlang.system_info(:schedulers_online),
       "instance_id" => System.get_env("EC2_INSTANCE_ID"),
       "boot_count" => Uniapp.Data.boot_count(),
+      "nosync_file" => Uniapp.Data.dir() != nil and File.exists?(Path.join(Uniapp.Data.dir(), "nosync.txt")),
       "echo_bench_bytes_per_s" => bench_cached()
     }
   end
@@ -127,7 +128,7 @@ defmodule Uniapp.Health do
     label = if peer, do: "tcp_echo_peer", else: "tcp_echo"
 
     with {:ok, addr} <- addr_result,
-         {:ok, sock} <- :gen_tcp.connect(addr, Uniapp.Application.echo_port(), [:binary, active: false, packet: 0, sndbuf: 1 <<< 20, recbuf: 1 <<< 20], 5_000) do
+         {:ok, sock} <- :gen_tcp.connect(addr, Uniapp.Application.echo_port(), [:binary, active: false, packet: 0, sndbuf: 256 <<< 10, recbuf: 256 <<< 10], 5_000) do
       line = :binary.copy(<<"x">>, 1023) <> "\n"
       n = div(bytes, byte_size(line))
       t0 = System.monotonic_time(:microsecond)

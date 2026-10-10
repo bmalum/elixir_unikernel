@@ -1,5 +1,5 @@
 diff --git a/kernel/core/comps/nvme/src/device/block_device.rs b/kernel/core/comps/nvme/src/device/block_device.rs
-index 817118e0..2a5f4945 100644
+index 817118e0..436fbb91 100644
 --- a/kernel/core/comps/nvme/src/device/block_device.rs
 +++ b/kernel/core/comps/nvme/src/device/block_device.rs
 @@ -225,6 +225,14 @@ impl NvmeDeviceInner {
@@ -45,7 +45,42 @@ index 817118e0..2a5f4945 100644
          let io_msix_vectors = init_ctx.create_io_queues()?;
          let device = NvmeDeviceInner {
              submission_queues: init_ctx
-@@ -542,6 +555,8 @@ struct InitContext {
+@@ -432,7 +445,6 @@ impl NvmeDeviceInner {
+                 let rest = commands.split_off(n);
+                 let batch = core::mem::replace(&mut commands, rest);
+ 
+-                let n_submitted = batch.len();
+                 let items = batch.into_iter().map(|(entry, prp)| {
+                     (
+                         entry,
+@@ -442,11 +454,24 @@ impl NvmeDeviceInner {
+                         },
+                     )
+                 });
+-                sq.submit_with_items(items)
+-                    .expect("SQ `free_slots` indicated space for this `submit_with_items`");
++                let mut leftover = Vec::new();
++                let n_submitted = sq.submit_with_items(items, &mut leftover);
+                 for _ in 0..n_submitted {
+                     self.stats.increment_submitted();
+                 }
++                if !leftover.is_empty() {
++                    // The next slot's previous command is fetched but not yet
++                    // completed; put the rest back and wait for completions.
++                    let mut rest: Vec<_> = leftover
++                        .into_iter()
++                        .map(|(entry, sr)| (entry, sr._prp))
++                        .collect();
++                    rest.append(&mut commands);
++                    commands = rest;
++                    if n_submitted == 0 {
++                        return None;
++                    }
++                }
+             }
+             Some(())
+         });
+@@ -542,6 +567,8 @@ struct InitContext {
      completion_queues: [NvmeCompletionQueue; QUEUE_NUM],
      transport: NvmePciTransport,
      dstrd: u16,
@@ -54,7 +89,7 @@ index 817118e0..2a5f4945 100644
      cc_mps_value: u32,
      controller_ready_timeout: Duration,
      max_io_bytes: NonZeroUsize,
-@@ -584,6 +599,7 @@ impl InitContext {
+@@ -584,6 +611,7 @@ impl InitContext {
      fn new(
          transport: NvmePciTransport,
          dstrd: u16,
@@ -62,7 +97,7 @@ index 817118e0..2a5f4945 100644
          cc_mps_value: u32,
          controller_ready_timeout: Duration,
      ) -> Result<Self, NvmeDeviceError> {
-@@ -596,6 +612,7 @@ impl InitContext {
+@@ -596,6 +624,7 @@ impl InitContext {
              completion_queues: [cq0, cq1],
              transport,
              dstrd,
@@ -70,7 +105,7 @@ index 817118e0..2a5f4945 100644
              cc_mps_value,
              controller_ready_timeout,
              max_io_bytes: MAX_BYTES_BY_NLB,
-@@ -736,6 +753,19 @@ impl InitContext {
+@@ -736,6 +765,19 @@ impl InitContext {
          })
      }
  
@@ -90,7 +125,7 @@ index 817118e0..2a5f4945 100644
      fn create_io_queues(&mut self) -> Result<IoMsixVectors, NvmeDeviceError> {
          // Pre-allocate MSI-X vectors for I/O queues
          let io_msix_vectors = {
-@@ -758,20 +788,27 @@ impl InitContext {
+@@ -758,20 +800,27 @@ impl InitContext {
              let entry = nvme_cmd::create_io_completion_queue(
                  io_qid as u16,
                  cptr,
@@ -122,7 +157,7 @@ index 817118e0..2a5f4945 100644
          }
  
          Ok(IoMsixVectors(io_msix_vectors))
-@@ -782,6 +819,7 @@ impl InitContext {
+@@ -782,6 +831,7 @@ impl InitContext {
          qid: usize,
          entry: NvmeCommand,
      ) -> Result<(), NvmeDeviceError> {
@@ -130,7 +165,7 @@ index 817118e0..2a5f4945 100644
          let expected_cid = self
              .sq_mut(qid)
              .submit(entry)
-@@ -816,6 +854,10 @@ impl InitContext {
+@@ -816,6 +866,10 @@ impl InitContext {
                  continue;
              };
              if cqe.has_error() {
@@ -179,10 +214,22 @@ index c55051a1..92cc5153 100644
  #[expect(dead_code)]
  pub(crate) fn delete_io_completion_queue(qid: u16) -> NvmeCommand {
 diff --git a/kernel/core/comps/nvme/src/nvme_queue.rs b/kernel/core/comps/nvme/src/nvme_queue.rs
-index 4ed21417..bb4d3ae4 100644
+index 4ed21417..77838da8 100644
 --- a/kernel/core/comps/nvme/src/nvme_queue.rs
 +++ b/kernel/core/comps/nvme/src/nvme_queue.rs
-@@ -36,6 +36,8 @@ pub(crate) struct NvmeCompletionQueue {
+@@ -11,10 +11,7 @@ use core::{
+ };
+ 
+ use aster_util::{field_ptr, safe_ptr::SafePtr};
+-use ostd::{
+-    mm::{HasDaddr, dma::DmaCoherent},
+-    warn,
+-};
++use ostd::mm::{HasDaddr, dma::DmaCoherent};
+ 
+ use crate::{
+     nvme_regs::NvmeDoorbellRegs,
+@@ -36,6 +33,8 @@ pub(crate) struct NvmeCompletionQueue {
      cqueue: SafePtr<Cqring, DmaCoherent>,
      head: u16,
      phase: bool,
@@ -191,7 +238,7 @@ index 4ed21417..bb4d3ae4 100644
  }
  
  struct Cqring {
-@@ -52,9 +54,17 @@ impl NvmeCompletionQueue {
+@@ -52,9 +51,17 @@ impl NvmeCompletionQueue {
              cqueue: SafePtr::new(dma, 0),
              head: 0,
              phase: true,
@@ -209,7 +256,7 @@ index 4ed21417..bb4d3ae4 100644
      /// Returns the DMA physical address of the completion ring.
      pub(crate) fn cq_daddr(&self) -> usize {
          self.cqueue.daddr()
-@@ -81,7 +91,7 @@ impl NvmeCompletionQueue {
+@@ -81,7 +88,7 @@ impl NvmeCompletionQueue {
          let entry = ring_slot_ptr
              .read()
              .expect("CQ slot pointer must be valid within allocated DMA ring");
@@ -218,25 +265,25 @@ index 4ed21417..bb4d3ae4 100644
          if self.head == 0 {
              self.phase = !self.phase;
          }
-@@ -133,9 +143,16 @@ impl<C: Default> NvmeSubmissionQueue<C> {
+@@ -133,9 +140,16 @@ impl<C: Default> NvmeSubmissionQueue<C> {
  impl<C> NvmeSubmissionQueue<C> {
      /// Updates the mirrored SQ head from the SQ head pointer in `completion`.
      pub(crate) fn update_sq_head(&mut self, completion: &NvmeCompletion) {
 -        self.inner.head = completion.sq_head() % (QUEUE_DEPTH as u16);
 +        self.inner.head = completion.sq_head() % self.inner.depth;
-+    }
-+
+     }
+ 
 +    /// Limits the ring to `depth` entries; see [`NvmeCompletionQueue::set_depth`].
 +    pub(crate) fn set_depth(&mut self, depth: u16) {
 +        debug_assert!(depth >= 2 && depth as usize <= QUEUE_DEPTH);
 +        self.inner.depth = depth;
-     }
- 
++    }
++
 +
      /// Returns the DMA physical address of the submission ring.
      pub(crate) fn sq_daddr(&self) -> usize {
          self.inner.squeue.daddr()
-@@ -143,12 +160,13 @@ impl<C> NvmeSubmissionQueue<C> {
+@@ -143,12 +157,13 @@ impl<C> NvmeSubmissionQueue<C> {
  
      /// Returns the number of SQ slots available for new commands starting at the current tail.
      pub(crate) fn free_slots(&self) -> usize {
@@ -252,7 +299,7 @@ index 4ed21417..bb4d3ae4 100644
      }
  }
  
-@@ -177,6 +195,8 @@ struct NvmeSubmissionQueueInner {
+@@ -177,6 +192,8 @@ struct NvmeSubmissionQueueInner {
      squeue: SafePtr<Sqring, DmaCoherent>,
      tail: u16,
      head: u16,
@@ -261,7 +308,7 @@ index 4ed21417..bb4d3ae4 100644
  }
  
  struct Sqring {
-@@ -193,6 +213,7 @@ impl NvmeSubmissionQueueInner {
+@@ -193,6 +210,7 @@ impl NvmeSubmissionQueueInner {
              squeue: SafePtr::new(dma, 0),
              tail: 0,
              head: 0,
@@ -269,7 +316,7 @@ index 4ed21417..bb4d3ae4 100644
          })
      }
  
-@@ -202,7 +223,7 @@ impl NvmeSubmissionQueueInner {
+@@ -202,7 +220,7 @@ impl NvmeSubmissionQueueInner {
      ///
      /// Returns the new tail index for the SQ Tail doorbell, or `None` if full.
      fn submit(&mut self, entry: NvmeCommand) -> Option<u16> {
@@ -278,7 +325,7 @@ index 4ed21417..bb4d3ae4 100644
          if next_tail == self.head {
              return None;
          }
-@@ -261,8 +282,10 @@ where
+@@ -261,8 +279,10 @@ where
      fn poll(&mut self) -> Option<(NvmeCompletion, u16)> {
          let (new_head, entry) = self.queue.complete()?;
          if entry.has_error() {
@@ -291,6 +338,55 @@ index 4ed21417..bb4d3ae4 100644
                  self.qid,
                  entry.cid(),
                  entry.status(),
+@@ -350,30 +370,39 @@ impl<'a, Q, T> NvmeSubmissionQueueAccess<'a, Q>
+ where
+     Q: DerefMut<Target = NvmeSubmissionQueue<Context<T>>>,
+ {
+-    /// Submits a batch of commands with contexts and rings the SQ doorbell once.
++    /// Enqueues as many commands as fit and returns how many were taken; the
++    /// rest are handed back in `leftover`. A slot can be free by the head
++    /// pointer (the device fetched the previous command) while its request is
++    /// still outstanding (not yet completed); such a slot is not reused, so
++    /// this can take fewer commands than `free_slots()` suggested.
+     pub(crate) fn submit_with_items(
+         &mut self,
+         commands: impl IntoIterator<Item = (NvmeCommand, T)>,
+-    ) -> Option<usize> {
++        leftover: &mut alloc::vec::Vec<(NvmeCommand, T)>,
++    ) -> usize {
+         let mut count = 0;
+-        for (entry, item) in commands {
+-            self.enqueue_one(entry, item)?;
++        let mut iter = commands.into_iter();
++        for (entry, item) in iter.by_ref() {
++            if self.queue.context.0[self.queue.inner.tail as usize].is_some() {
++                leftover.push((entry, item));
++                break;
++            }
++            if self.enqueue_one(entry, item).is_none() {
++                break;
++            }
+             count += 1;
+         }
++        leftover.extend(iter);
+         if count > 0 {
+             self.ring_doorbell();
+         }
+-        Some(count)
++        count
+     }
+ 
+     /// Enqueues one command and context without ringing the SQ doorbell.
+     fn enqueue_one(&mut self, mut entry: NvmeCommand, item: T) -> Option<u16> {
+         let cid = self.queue.inner.tail;
+         if self.queue.context.0[cid as usize].is_some() {
+-            warn!(
+-                "submission queue {} slot {} is still outstanding",
+-                self.qid, cid
+-            );
+             return None;
+         }
+         entry.set_cid(cid);
 diff --git a/kernel/core/comps/nvme/src/nvme_regs.rs b/kernel/core/comps/nvme/src/nvme_regs.rs
 index 11e7575f..ea6a0e59 100644
 --- a/kernel/core/comps/nvme/src/nvme_regs.rs

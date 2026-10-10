@@ -79,6 +79,18 @@ Work towards running on EC2 (docs/GOALS-EC2.md).
 - `scripts/smoke-ec2.sh`: health endpoint, BENCH/BULK, ENA ready and
   keep-alive assertions (29 in total); `QUICK=1` short mode.
 
+- Storage: `uniapp.mounts=` for additional ext2 volumes, `LABEL=` device
+  specs (`mkdata.sh` takes a label), periodic `sync` in `/init`
+  (`uniapp.sync_s`, default 30 s); a write without `fsync` survives a hard
+  kill. Patch 0007 also fixes an NVMe submission-slot race that panicked
+  the kernel under write load.
+- `/init` sleeps in `poll(2)`; the Linux power button (evdev) is seen in
+  about 40 ms instead of up to 250 ms.
+- IPv6 probes (`uniapp.probe_ipv6=1`): loopback works on both kernels; no
+  SLAAC/DHCPv6, documented. Hibernation documented as unsupported.
+- `scripts/upstream-branches.sh`: the patches as topic branches on the
+  Asterinas fork for upstream pull requests.
+
 ### Changed
 - `make run-*`/`smoke-*` no longer pass `uniapp.ip=`; both kernels use DHCP.
 - `/init` no longer `exec`s `beam.smp`; the VM runs as PID 2 under the

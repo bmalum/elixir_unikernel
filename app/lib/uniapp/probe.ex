@@ -19,6 +19,11 @@ defmodule Uniapp.Probe do
       report("tls", fn -> tls(host) end)
     end
 
+    if Uniapp.Cmdline.get("uniapp.probe_ipv6") in ["1", "on"] do
+      report("ipv6_loopback", fn -> ipv6_loopback() end)
+      report("ipv6_ifaddrs", fn -> ipv6_ifaddrs() end)
+    end
+
     IO.puts("PROBE done")
     # Throughput self-test through the echo server, printed as BENCH for the smoke test.
     wait_ready(50)
@@ -33,6 +38,25 @@ defmodule Uniapp.Probe do
 
   defp wait_ready(0), do: :ok
   defp wait_ready(n), do: if(Uniapp.Health.ready?(), do: :ok, else: (Process.sleep(100); wait_ready(n - 1)))
+
+  # IPv6 over loopback: listen on ::1, connect, echo one line.
+  defp ipv6_loopback do
+    {:ok, l} = :gen_tcp.listen(0, [:inet6, :binary, active: false, ip: {0, 0, 0, 0, 0, 0, 0, 1}])
+    {:ok, port} = :inet.port(l)
+    {:ok, c} = :gen_tcp.connect({0, 0, 0, 0, 0, 0, 0, 1}, port, [:inet6, :binary, active: false], 5_000)
+    {:ok, a} = :gen_tcp.accept(l, 5_000)
+    :ok = :gen_tcp.send(c, "v6\n")
+    {:ok, "v6\n"} = :gen_tcp.recv(a, 0, 5_000)
+    Enum.each([a, c, l], &:gen_tcp.close/1)
+    :ok
+  end
+
+  # Does any interface have a global/link-local IPv6 address?
+  defp ipv6_ifaddrs do
+    {:ok, ifs} = :inet.getifaddrs()
+    v6 = for {name, opts} <- ifs, {:addr, {_, _, _, _, _, _, _, _} = a} <- opts, do: {name, :inet.ntoa(a)}
+    if v6 == [], do: {:error, :no_ipv6_addresses}, else: {:ok, v6}
+  end
 
   defp report(name, fun) do
     # Run each probe in its own unlinked process so a crash only fails that probe.

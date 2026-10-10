@@ -213,6 +213,16 @@ through `early_println!` so the next controller quirk is visible at
 `loglevel=error`. Result: `/dev/nvme1n1` (a data volume on `/dev/sdf`)
 mounts as ext2 on a t3.small and the boot counter survives a reboot.
 
+A second fix landed in the same patch later: under write load (`File.write`
+plus a concurrent `sync`) the driver panicked with "SQ `free_slots`
+indicated space for this `submit_with_items`". The device advances the SQ
+head when it *fetches* a command, before the completion arrives, so
+`free_slots()` can report a slot whose request is still outstanding;
+`submit_with_items` then refused it and the caller `expect`ed success.
+It now enqueues what fits, hands the rest back, and the caller waits for
+completions. The driver keeps one I/O queue: EBS limits the depth (32),
+not the count, and gp3's baseline IOPS are served fine by it.
+
 ## 0008: ACPI power button and S5
 
 Symptom: `aws ec2 stop-instances` left the instance in `stopping` for four

@@ -26,10 +26,12 @@ replaces the release's shell script, `erlexec`, and an init system.
 6. Time (`uniapp.ntp`): one SNTP exchange against Amazon Time Sync
    (169.254.169.123) or the given server, then `clock_settime`. On Nitro the
    firmware clock has been 0.4 to 2.7 s off at boot.
-7. Data volume (`uniapp.data`): mount an ext2 volume read-write on `/data`,
-   retrying for 5 s while the block device appears. ext2 is what the Asterinas
-   kernel mounts; `scripts/mkdata.sh` makes a suitable image (4 KiB blocks,
-   no `dir_index`).
+7. Data volumes (`uniapp.data`, `uniapp.mounts`): mount ext2 volumes
+   read-write, by device node or by label (read from the superblock),
+   retrying for 5 s while the block devices appear. ext2 is what the
+   Asterinas kernel mounts; `scripts/mkdata.sh` makes a suitable image
+   (4 KiB blocks, no `dir_index`). The supervisor calls `sync(2)` every
+   `uniapp.sync_s` seconds (30) and unmounts everything before power off.
 8. Export the environment: `ROOTDIR`, `BINDIR` (ERTS uses it to locate
    `erl_child_setup`; a missing `BINDIR` is fatal), `EMU`, `PROGNAME`,
    `HOME`, `LANG=C.UTF-8`, `TERM=dumb`, `RELEASE_ROOT`, `RELEASE_NAME`,
@@ -38,8 +40,10 @@ replaces the release's shell script, `erlexec`, and an init system.
    else `/dev/null`), `KERNEL_CMDLINE`, `UNIAPP_DATA`, `EC2_*`,
    `AWS_REGION`, `EC2_IMDS_TOKEN`.
 9. Build the argument vector, `fork` and `execv` `beam.smp` in the child.
-   `/init` stays PID 1 as a supervisor: it reaps orphans, resyncs the clock
-   every hour, and when the VM exits it logs the status, unmounts `/data`
+   `/init` stays PID 1 as a supervisor: it sleeps in `poll(2)` on the input
+   devices (woken by `SIGCHLD`, a power button event, or a 1 s tick), reaps
+   orphans, resyncs the clock every hour, syncs the volumes, and when the VM
+   exits it logs the status, unmounts `/data`
    and performs `uniapp.on_exit` (default `reboot(RB_AUTOBOOT)`). The
    kernel's restart path (patch 0006) then resets the machine; on EC2 the
    same AMI boots again, which is how a crashed node heals under an

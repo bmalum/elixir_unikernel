@@ -10,6 +10,7 @@ defmodule Uniapp.Application do
     )
 
     boot_count = Uniapp.Data.bump_boot_counter()
+    Uniapp.Data.maybe_write_test()
 
     children = [
       Uniapp.Cloudwatch,
