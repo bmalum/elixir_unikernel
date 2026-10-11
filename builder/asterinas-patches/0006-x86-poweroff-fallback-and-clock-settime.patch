@@ -144,15 +144,17 @@ index 2b5dfbef..2e3b5a95 100644
  mod close;
  mod connect;
 diff --git a/kernel/core/src/time/mod.rs b/kernel/core/src/time/mod.rs
-index e2639003..abc8af1c 100644
+index e2639003..19afbd30 100644
 --- a/kernel/core/src/time/mod.rs
 +++ b/kernel/core/src/time/mod.rs
-@@ -5,7 +5,7 @@
+@@ -5,7 +5,9 @@
  pub(crate) use core::{Clock, timer};
  
  use ::core::time::Duration;
 -pub(crate) use system_time::{START_TIME, SystemTime};
-+pub(crate) use system_time::{START_TIME, SystemTime, realtime_adjust, set_realtime};
++#[cfg(not(target_arch = "loongarch64"))]
++pub(crate) use system_time::realtime_adjust;
++pub(crate) use system_time::{START_TIME, SystemTime, set_realtime};
  pub(crate) use timer::{Timer, TimerManager};
  
  use crate::prelude::*;

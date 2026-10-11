@@ -169,15 +169,16 @@ index 7c469e6a..8f906351 100644
 +    }
  }
 diff --git a/kernel/core/src/init.rs b/kernel/core/src/init.rs
-index 843362b0..e99ca3ed 100644
+index 843362b0..2c908def 100644
 --- a/kernel/core/src/init.rs
 +++ b/kernel/core/src/init.rs
-@@ -263,6 +263,12 @@ fn with_init_argv0(init_name: &str, mut argv: Vec<CString>) -> Vec<CString> {
+@@ -263,6 +263,13 @@ fn with_init_argv0(init_name: &str, mut argv: Vec<CString>) -> Vec<CString> {
  
  static INIT_PROCESS: Once<Arc<Process>> = Once::new();
  
 +/// A weak reference to the init process, for code that must not block
 +/// (e.g. interrupt callbacks delivering `SIGPWR`).
++#[cfg(target_arch = "x86_64")]
 +pub(crate) fn init_process_weak() -> Option<Weak<Process>> {
 +    INIT_PROCESS.get().map(Arc::downgrade)
 +}

@@ -46,3 +46,11 @@ few hundred lines help a lot.
 
 Be kind and specific. Technical disagreement is welcome; personal remarks are
 not.
+
+## Long-running commands
+
+Kernel lints and builds take minutes. Run them detached and poll:
+`scripts/bg.sh start NAME -- CMD`, `scripts/bg.sh wait NAME 60`,
+`scripts/bg.sh kill NAME` (also kills the job's docker containers, which
+otherwise keep cargo's lock). See the patches chapter of the manual.
+

@@ -340,6 +340,21 @@ Pull requests against `asterinas/asterinas`, opened 2026-10-10:
 | 0007 | [#3985](https://github.com/asterinas/asterinas/pull/3985) NVMe on EBS |
 | 0008 | [#3987](https://github.com/asterinas/asterinas/pull/3987) ACPI power button, S5 (on top of #3986) |
 
+### Checking the stack like upstream CI does
+
+Upstream tests every pull request on its own, on x86-64, riscv64 and
+loongarch64, so each patch must be rustfmt- and clippy-clean *at its point
+in the stack*, not only with all nine applied (0003 once used an import
+that 0004 added; 0006 referred to the vDSO, which LoongArch lacks).
+`scripts/aster-lint.sh REF ARCH...` runs the same `format_all.sh --check`
+and `clippy_check.sh workspace` in the pinned dev image against any commit
+of `build/aster-fork`; `--matrix "REF:ARCH ..."` runs several. A run takes
+5 to 10 minutes under Rosetta, so never block on it: start it with
+`scripts/bg.sh start lint -- scripts/aster-lint.sh ...` and poll with
+`scripts/bg.sh wait lint 60`. `bg.sh kill lint` also kills the labelled
+container; a cancelled `docker run` otherwise keeps holding cargo's
+build-directory lock and every later build silently waits for it.
+
 Upstream CI (`make check`) runs rustfmt and clippy with warnings as errors;
 the patches are formatted with `tools/format_all.sh` and clippy-clean as of
 the 2026-07-21 nightly (`is_multiple_of`, let chains, `while let`). Two
