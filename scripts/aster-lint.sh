@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# aster-lint.sh: run upstream Asterinas' lint job (rustfmt check + clippy with
-# -D warnings) on a ref of the fork clone, for one or more target archs, the
+# aster-lint.sh: run upstream Asterinas' lint job (typos, rustfmt check, clippy
+# with -D warnings) on a ref of the fork clone, for one or more target archs, the
 # way asterinas/asterinas CI does per PR. Prints one "LINT ref arch: ok|FAIL"
 # line per arch plus the first errors; exits non-zero if any failed.
 #
@@ -45,6 +45,7 @@ for p in "${pairs[@]}"; do
       -v "$ROOT/build/asterinas-cache/cargo-registry":/root/.cargo/registry \
       -w /root/asterinas "$IMAGE" bash -c '
         make install_osdk >/dev/null 2>&1
+        if typos >/dev/null 2>&1; then echo TYPOS_OK; else echo TYPOS_FAIL; typos 2>&1 | grep -E "^error|-->" | head -6; fi
         if ./tools/format_all.sh --check >/dev/null 2>&1; then echo FMT_OK; else echo FMT_FAIL; ./tools/format_all.sh --check 2>&1 | grep "^Diff in" | head -5; fi
         for try in 1 2 3; do
           o=$(./tools/clippy_check.sh workspace 2>&1)
@@ -56,10 +57,10 @@ for p in "${pairs[@]}"; do
       ' 2>&1 | grep -v "toolchain file" || true)
   rm -f "$WT/core"
   dt=$(( $(date +%s) - t0 ))
-  if echo "$out" | grep -q FMT_OK && echo "$out" | grep -q CLIPPY_OK; then
+  if echo "$out" | grep -q TYPOS_OK && echo "$out" | grep -q FMT_OK && echo "$out" | grep -q CLIPPY_OK; then
     echo "LINT $sha $arch: ok (${dt}s)"
   else
-    echo "LINT $sha $arch: FAIL (${dt}s)"; echo "$out" | grep -vE '^(FMT|CLIPPY)_' | sed 's/^/    /'; fail=1
+    echo "LINT $sha $arch: FAIL (${dt}s)"; echo "$out" | grep -vE '^(TYPOS|FMT|CLIPPY)_' | sed 's/^/    /'; fail=1
   fi
 done
 rm -rf "$WT"; git -C "$FORK" worktree prune

@@ -11,7 +11,7 @@ index 084d49b4..cfeed537 100644
  aster-pci.workspace = true
  component.workspace = true
 diff --git a/kernel/core/comps/ena/src/admin.rs b/kernel/core/comps/ena/src/admin.rs
-index 4178fa31..7a2a485d 100644
+index eb45ad50..f6d387e8 100644
 --- a/kernel/core/comps/ena/src/admin.rs
 +++ b/kernel/core/comps/ena/src/admin.rs
 @@ -14,7 +14,7 @@ use core::{

@@ -121,7 +121,7 @@ index 00000000..084d49b4
 +workspace = true
 diff --git a/kernel/core/comps/ena/src/admin.rs b/kernel/core/comps/ena/src/admin.rs
 new file mode 100644
-index 00000000..4178fa31
+index 00000000..eb45ad50
 --- /dev/null
 +++ b/kernel/core/comps/ena/src/admin.rs
 @@ -0,0 +1,463 @@
@@ -190,7 +190,7 @@ index 00000000..4178fa31
 +    pub(crate) status: u8,
 +    pub(crate) flags: u8,
 +    pub(crate) extended_status: u16,
-+    pub(crate) sq_head_indx: u16,
++    pub(crate) sq_head_index: u16,
 +    pub(crate) data: [u32; 14],
 +}
 +
