@@ -2,7 +2,7 @@
 # Turns builder/asterinas-patches into commits on upstream Asterinas ec5bb9ed,
 # one topic branch per upstreamable unit plus `elixir-unikernel-all`, in a
 # clone of the fork at $FORK (default build/aster-fork, github.com/bmalum/asterinas).
-# Commit messages come from the manual's patch chapter (build/patch-msgs, see
+# Commit messages come from builder/asterinas-patches/*.msg (see
 # below). Pass --push to push every branch to origin.
 #
 #   scripts/upstream-branches.sh [--push]
@@ -12,36 +12,17 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 FORK=${FORK:-$PWD/build/aster-fork}
 BASE=ec5bb9ed798851b4c1854e791341321902ac8bc9
 P=$ROOT/builder/asterinas-patches
-M=$ROOT/build/patch-msgs
 
-# Commit bodies: the per-patch sections of the manual.
-mkdir -p "$M"
-python3 - "$ROOT/docs/book/src/internals/asterinas-patches.md" "$M" <<'PY'
-import re, sys, json
-s=open(sys.argv[1]).read(); out=sys.argv[2]
-secs=re.split(r'^## (\d{4}): ', s, flags=re.M); titles={}
-for i in range(1,len(secs),2):
-    num=secs[i]; title,_,rest=secs[i+1].partition('\n')
-    rest=re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', rest.split('\n## ')[0].strip())
-    open(f'{out}/{num}.txt','w').write(rest+'\n'); titles[num]=title.strip().replace('`','')
-json.dump(titles, open(f'{out}/titles.json','w'))
-PY
-
+# Commit messages: builder/asterinas-patches/NNNN-*.msg, written in upstream's
+# form (imperative subject <= 72 chars, body with the why). The manual's patch
+# chapter holds the long story.
 [ -d "$FORK/.git" ] || git clone -q --filter=blob:none https://github.com/bmalum/asterinas.git "$FORK"
 cd "$FORK"
 git cat-file -e "$BASE^{commit}" 2>/dev/null || git fetch -q "$ROOT/build/asterinas-src" "$BASE"
 
-commit_patch() { n=$1; f=$(ls "$P"/$n-*.patch); title=$(python3 -c "import json;print(json.load(open('$M/titles.json'))['$n'])")
+commit_patch() { n=$1; f=$(ls "$P"/$n-*.patch); m=${f%.patch}.msg
   git apply "$f"; git add -A
-  git -c user.name=bmalum -c user.email=support@bmalum.com commit -q -F - <<MSG
-$2: $title
-
-$(cat "$M/$n.txt")
-
-Found while running Erlang/Elixir (elixir_unikernel) on Asterinas, where this
-is applied as builder/asterinas-patches/$(basename "$f").
-Base: ec5bb9ed. Project: https://github.com/bmalum/elixir_unikernel
-MSG
+  git -c user.name=bmalum -c user.email=support@bmalum.com commit -q -F "$m"
 }
 area() { case $1 in 0001|0003|0004) echo net;; 0002) echo time;; 0005|0009) echo ena;; 0006) echo x86;; 0007) echo nvme;; 0008) echo acpi;; esac; }
 mk() { git checkout -q -B "$1" "$BASE"; }
